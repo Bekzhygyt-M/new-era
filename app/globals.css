@@ -1,0 +1,170 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── CSS Design Tokens ───────────────────────────────────────────────── */
+:root {
+  --background: #080808;
+  --surface: #111111;
+  --surface-2: #1a1a1a;
+  --border: rgba(255, 255, 255, 0.06);
+  --border-2: rgba(255, 255, 255, 0.12);
+  --foreground: #ffffff;
+  --muted: #666666;
+  --font-inter: 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+/* ─── Base Reset ──────────────────────────────────────────────────────── */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-inter);
+  font-size: 16px;
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+/* ─── Grid & Trading Terminal Backgrounds ──────────────────────────────── */
+.grid-bg {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+.trading-matrix-bg {
+  background-color: #060606;
+  background-image: 
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.05) 0%, transparent 60%),
+    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 100% 100%, 36px 36px, 36px 36px;
+}
+
+.terminal-card {
+  background: rgba(10, 10, 10, 0.85);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+}
+
+.terminal-card:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+/* ─── Scrollbar ───────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: var(--background); }
+::-webkit-scrollbar-thumb { background: #222; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #333; }
+
+/* ─── Selection ───────────────────────────────────────────────────────── */
+::selection { background: rgba(255,255,255,0.2); color: #fff; }
+
+/* ─── Utilities ───────────────────────────────────────────────────────── */
+.text-gradient-white {
+  background: linear-gradient(135deg, #ffffff 0%, #999999 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.glow-white {
+  box-shadow: 0 0 20px rgba(255,255,255,0.08), 0 0 50px rgba(255,255,255,0.03);
+}
+
+.glow-white-sm {
+  box-shadow: 0 0 12px rgba(255,255,255,0.1);
+}
+
+.card-premium {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+.card-premium:hover {
+  border-color: var(--border-2);
+  box-shadow: 0 8px 40px rgba(0,0,0,0.4);
+}
+
+/* ─── Animations ──────────────────────────────────────────────────────── */
+@keyframes floatY {
+  0%, 100% { transform: translate3d(0, 0px, 0); }
+  50% { transform: translate3d(0, -9px, 0); }
+}
+@keyframes floatYReverse {
+  0%, 100% { transform: translate3d(0, 0px, 0); }
+  50% { transform: translate3d(0, 8px, 0); }
+}
+
+.animate-float  { animation: floatY 5s ease-in-out infinite; will-change: transform; }
+.animate-float-delayed { animation: floatYReverse 6s ease-in-out infinite; animation-delay: 1s; will-change: transform; }
+
+.dot-pulse { animation: dotPulse 2s ease infinite; }
+
+.ticker-wrap { 
+  overflow: hidden; 
+  white-space: nowrap; 
+  contain: paint;
+  width: 100%;
+}
+
+.ticker-inner { 
+  display: inline-flex; 
+  width: max-content;
+  animation: ticker 32s linear infinite; 
+  will-change: transform;
+}
+
+.ticker-wrap:hover .ticker-inner {
+  animation-play-state: paused;
+}
+
+@keyframes ticker {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+/*
+ * Lesson content is not printable (TZ §12).
+ *
+ * Print-to-PDF was the one capture path a page can actually close, so it is.
+ * Screenshots and screen recorders remain out of reach of any web API — the
+ * player deters those with a per-viewer watermark instead.
+ */
+@media print {
+  [data-protected] {
+    display: none !important;
+  }
+
+  [data-protected-notice]::after {
+    content: 'NEW ERA — dars materiallarini chop etish mumkin emas.';
+    display: block;
+    padding: 2rem;
+    font-family: monospace;
+    text-align: center;
+  }
+}
+
+/* Lesson video and its overlay are not selectable or draggable. */
+[data-protected] video,
+[data-protected] img {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}

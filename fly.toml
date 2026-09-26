@@ -1,0 +1,40 @@
+# NEW ERA — Fly.io deployment.
+#
+# One machine with a persistent volume: the JSON store and uploaded media live
+# on the volume, so a redeploy replaces the container without touching data.
+# Keep it at a single machine — the local store is not safe to share.
+
+app = 'newera'
+primary_region = 'fra'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  NODE_ENV = 'production'
+  # Everything writable lives on the volume, never in the image.
+  DATA_DIR = '/data'
+  PORT = '3000'
+
+[[mounts]]
+  source = 'newera_data'
+  destination = '/data'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # The store is file-backed, so exactly one machine may run at a time.
+  auto_stop_machines = 'suspend'
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '20s'
+    method = 'GET'
+    path = '/api/health'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '1gb'

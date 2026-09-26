@@ -1,0 +1,10 @@
+node_modules
+.next
+data
+private
+public/uploads
+.env
+.env*.local
+*.tsbuildinfo
+.DS_Store
+.git
