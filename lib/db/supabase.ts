@@ -3,6 +3,7 @@ import {
   DEFAULT_SETTINGS,
   MASTER_ADMIN_EMAIL,
   type AdminSettings,
+  type ApprovePaymentResult,
   type LocalAnswer,
   type LocalBacktest,
   type LocalCertificate,
@@ -496,7 +497,7 @@ export const supabaseAdapter: Database = {
       new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
     if (existing) {
-      const { id: _ignored, ...patch } = enrollment;
+      const { id: _, ...patch } = enrollment;
       return updateOne<LocalEnrollment>(
         'enrollments',
         existing.id,
@@ -731,6 +732,46 @@ export const supabaseAdapter: Database = {
       },
       'approvePayment'
     );
+  },
+
+  async approvePaymentAndEnroll(
+    idOrOrderId: string,
+    approvedBy?: string,
+    period?: string
+  ): Promise<ApprovePaymentResult> {
+    const payment = await supabaseAdapter.getPayment(idOrOrderId);
+    if (!payment) return { ok: false, error: 'To‘lov topilmadi' };
+
+    const { data, error } = await sb().rpc('approve_payment_and_enroll', {
+      p_payment_id: payment.id,
+      p_approved_by: approvedBy ?? null,
+      p_period: period || (payment as unknown as Record<string, unknown>).period || 'monthly',
+    });
+
+    if (error) {
+      return { ok: false, error: error.message };
+    }
+
+    const rpcResult = data as {
+      ok: boolean;
+      error?: string;
+      payment?: LocalPayment;
+      was_already_approved?: boolean;
+    };
+
+    if (!rpcResult.ok) {
+      return { ok: false, error: rpcResult.error || 'RPC execution failed' };
+    }
+
+    const updatedPayment = rpcResult.payment
+      ? (await attachPaymentRelations([rpcResult.payment]))[0]
+      : payment || undefined;
+
+    return {
+      ok: true,
+      payment: updatedPayment || undefined,
+      was_already_approved: rpcResult.was_already_approved,
+    };
   },
 
   async rejectPayment(idOrOrderId, reason, rejectedBy) {
@@ -1103,7 +1144,7 @@ export const supabaseAdapter: Database = {
 
   async saveFaq(faq) {
     if (faq.id) {
-      const { id: _ignored, ...patch } = faq;
+      const { id: _, ...patch } = faq;
       return updateOne<LocalFaq>('faqs', faq.id, patch, 'saveFaq:update');
     }
     return insertOne<LocalFaq>('faqs', { ...faq }, 'saveFaq:insert');

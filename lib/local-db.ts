@@ -17,6 +17,13 @@ import path from 'path';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+export interface ApprovePaymentResult {
+  ok: boolean;
+  error?: string;
+  payment?: LocalPayment;
+  was_already_approved?: boolean;
+}
+
 export interface LocalCourse {
   id: string;
   title: string;
@@ -142,6 +149,15 @@ export interface LocalPayment {
   currency: string;
   provider: string;
   status: 'pending' | 'receipt_submitted' | 'approved' | 'rejected' | 'expired' | 'cancelled';
+  /**
+   * Billing period the user chose ('daily' | 'monthly' | 'yearly').
+   *
+   * Exists as a real column on public.payments, and the approval path reads it
+   * to decide the enrollment duration. Declared here so the local JSON driver
+   * keeps the same behaviour as Supabase; without it the local driver silently
+   * dropped it and every plan fell back to 30 days.
+   */
+  period?: string;
   first_name?: string;
   last_name?: string;
   phone?: string;
@@ -1353,6 +1369,9 @@ export const localDb = {
         currency: paymentData.currency || settings.currency,
         provider: paymentData.provider || 'manual',
         status: paymentData.status || 'pending',
+        // Carry the chosen plan through, matching the Supabase driver. Omitted
+        // when absent so existing rows keep their current shape.
+        ...(paymentData.period ? { period: paymentData.period } : {}),
         first_name: paymentData.first_name,
         last_name: paymentData.last_name,
         phone: paymentData.phone,
@@ -1381,29 +1400,107 @@ export const localDb = {
       p.paid_at = now;
       p.approved_by = approvedBy;
 
-      const durationDays = (p as unknown as { period?: string }).period === 'daily' ? 1 : (p as unknown as { period?: string }).period === 'yearly' ? 365 : 30;
-      const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString();
+      return p;
+    });
+  },
+  approvePaymentAndEnroll(
+    idOrOrderId: string,
+    approvedBy?: string,
+    period?: string
+  ): ApprovePaymentResult {
+    return mutate((db) => {
+      const p = db.payments.find((x) => x.id === idOrOrderId || x.order_id === idOrOrderId);
+      if (!p) return { ok: false, error: 'To‘lov topilmadi' };
+      if (p.status === 'cancelled' || p.status === 'rejected') {
+        return { ok: false, error: 'To‘lov bekor qilingan yoki rad etilgan' };
+      }
 
-      const existing = db.enrollments.find((e) => e.user_id === p.user_id && e.course_id === p.course_id);
-      if (existing) {
-        existing.status = 'active';
-        existing.purchased_at = now;
-        existing.expires_at = expiresAt;
-        existing.plan_period = ((p as unknown as { period?: 'daily' | 'monthly' | 'yearly' }).period) || 'monthly';
+      const wasAlreadyApproved = p.status === 'approved';
+      const periodDays = period === 'daily' ? 1 : period === 'yearly' ? 365 : 30;
+      const periodMs = periodDays * 24 * 60 * 60 * 1000;
+      const paymentSource = p.order_id ? `payment:${p.order_id}` : `payment:${p.id}`;
+
+      let currentEnrollment = db.enrollments.find(
+        (e) => e.user_id === p.user_id && e.course_id === p.course_id
+      );
+
+      const nowMs = Date.now();
+
+      if (wasAlreadyApproved) {
+        if (
+          currentEnrollment &&
+          currentEnrollment.status === 'active' &&
+          (!currentEnrollment.expires_at ||
+            new Date(currentEnrollment.expires_at).getTime() > nowMs)
+        ) {
+          return { ok: true, payment: p, was_already_approved: true };
+        }
+        // Missing enrollment recovery path
+        const expiresAt = new Date(nowMs + periodMs).toISOString();
+        if (currentEnrollment) {
+          currentEnrollment.status = 'active';
+          currentEnrollment.source = paymentSource;
+          currentEnrollment.expires_at = expiresAt;
+        } else {
+          currentEnrollment = {
+            id: newId('enr'),
+            user_id: p.user_id,
+            course_id: p.course_id,
+            status: 'active',
+            purchased_at: new Date().toISOString(),
+            expires_at: expiresAt,
+            source: paymentSource,
+          };
+          db.enrollments.push(currentEnrollment);
+        }
+        return { ok: true, payment: p, was_already_approved: true };
+      }
+
+      let activeExpiryMs = 0;
+      if (
+        currentEnrollment &&
+        currentEnrollment.status === 'active' &&
+        currentEnrollment.expires_at
+      ) {
+        activeExpiryMs = new Date(currentEnrollment.expires_at).getTime();
+      }
+
+      const wasAlreadyExtendedForThisPayment =
+        activeExpiryMs > nowMs && currentEnrollment?.source === paymentSource;
+
+      let newExpiresAtIso: string;
+      if (wasAlreadyExtendedForThisPayment) {
+        newExpiresAtIso = new Date(activeExpiryMs).toISOString();
+      } else if (activeExpiryMs > nowMs) {
+        newExpiresAtIso = new Date(activeExpiryMs + periodMs).toISOString();
       } else {
-        db.enrollments.push({
+        newExpiresAtIso = new Date(nowMs + periodMs).toISOString();
+      }
+
+      if (currentEnrollment) {
+        currentEnrollment.status = 'active';
+        currentEnrollment.source = paymentSource;
+        currentEnrollment.expires_at = newExpiresAtIso;
+      } else {
+        currentEnrollment = {
           id: newId('enr'),
           user_id: p.user_id,
           course_id: p.course_id,
           status: 'active',
-          purchased_at: now,
-          expires_at: expiresAt,
-          plan_period: ((p as unknown as { period?: 'daily' | 'monthly' | 'yearly' }).period) || 'monthly',
-          source: 'payment',
-          completed_at: null,
-        });
+          purchased_at: new Date().toISOString(),
+          expires_at: newExpiresAtIso,
+          source: paymentSource,
+        };
+        db.enrollments.push(currentEnrollment);
       }
-      return p;
+
+      const now = new Date().toISOString();
+      p.status = 'approved';
+      p.approved_at = now;
+      p.paid_at = now;
+      p.approved_by = approvedBy;
+
+      return { ok: true, payment: p, was_already_approved: false };
     });
   },
 

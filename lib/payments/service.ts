@@ -26,33 +26,49 @@ export function remainingSeconds(payment: LocalPayment): number {
   return Math.max(0, Math.floor((new Date(payment.expires_at).getTime() - Date.now()) / 1000));
 }
 
+type PlanPeriod = 'daily' | 'monthly' | 'yearly';
+
+function getPaymentPeriod(payment: LocalPayment): PlanPeriod | undefined {
+  const period = (payment as unknown as Record<string, unknown>).period;
+  if (period === 'daily' || period === 'monthly' || period === 'yearly') {
+    return period;
+  }
+  return undefined;
+}
+
 export async function approvePayment(orderIdOrId: string, approvedBy: string): Promise<TransitionResult> {
   const existing = await db.getPayment(orderIdOrId);
   if (!existing) return { ok: false, error: 'To‘lov topilmadi' };
-  if (existing.status === 'approved') return { ok: true, payment: existing };
   if (existing.status === 'cancelled') return { ok: false, error: 'To‘lov bekor qilingan' };
 
-  const payment = await db.approvePayment(orderIdOrId, approvedBy);
-  if (!payment) return { ok: false, error: 'To‘lovni tasdiqlab bo‘lmadi' };
+  const period = getPaymentPeriod(existing);
 
-  const course = await db.getCourse(payment.course_id);
+  const result = await db.approvePaymentAndEnroll(existing.id, approvedBy, period);
+  if (!result.ok || !result.payment) {
+    return { ok: false, error: result.error || 'To‘lovni tasdiqlab bo‘lmadi' };
+  }
 
-  await db.addNotification({
-    user_id: payment.user_id,
-    title: 'To‘lov tasdiqlandi ✅',
-    message: `"${course?.title || 'Kurs'}" kursi ochildi. Buyurtma: ${payment.order_id}. Darslarni boshlashingiz mumkin!`,
-    type: 'payment_approved',
-    link: `/course/${payment.course_id}`,
-  });
+  // Create notification and log activity only on fresh transition (not on retries)
+  if (!result.was_already_approved && existing.status !== 'approved') {
+    const course = await db.getCourse(result.payment.course_id);
 
-  await db.logActivity(payment.user_id, 'payment_approved', {
-    order_id: payment.order_id,
-    course_id: payment.course_id,
-    amount: payment.amount,
-    approved_by: approvedBy,
-  });
+    await db.addNotification({
+      user_id: result.payment.user_id,
+      title: 'To‘lov tasdiqlandi ✅',
+      message: `"${course?.title || 'Kurs'}" kursi ochildi. Buyurtma: ${result.payment.order_id}. Darslarni boshlashingiz mumkin!`,
+      type: 'payment_approved',
+      link: `/course/${result.payment.course_id}`,
+    });
 
-  return { ok: true, payment };
+    await db.logActivity(result.payment.user_id, 'payment_approved', {
+      order_id: result.payment.order_id,
+      course_id: result.payment.course_id,
+      amount: result.payment.amount,
+      approved_by: approvedBy,
+    });
+  }
+
+  return { ok: true, payment: result.payment };
 }
 
 export async function rejectPayment(orderIdOrId: string, reason: string, rejectedBy: string): Promise<TransitionResult> {
