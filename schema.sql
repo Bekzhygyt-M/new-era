@@ -62,6 +62,10 @@ CREATE TABLE public.enrollments (
     course_id UUID REFERENCES public.courses(id) ON DELETE CASCADE,
     status TEXT DEFAULT 'active'::text,
     purchased_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    -- Course access expiry, set when a payment is approved. Matches
+    -- supabase/migrations/20260928_approve_payment_rpc.sql: timestamptz,
+    -- nullable, no default.
+    expires_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     UNIQUE(user_id, course_id)
 );

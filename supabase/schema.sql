@@ -262,6 +262,11 @@ create table if not exists public.enrollments (
   status       text not null default 'active' check (status in ('active', 'expired', 'revoked')),
   purchased_at timestamptz not null default now(),
   source       text not null default 'manual',
+  -- Course access expiry, set when a payment is approved. Added by
+  -- supabase/migrations/20260928_approve_payment_rpc.sql as
+  -- `timestamptz` (nullable, no default); declared here so a fresh install
+  -- matches production.
+  expires_at   timestamptz,
   completed_at timestamptz,
   unique (user_id, course_id)
 );
@@ -336,6 +341,12 @@ create table if not exists public.payments (
   status              text not null default 'pending'
                       check (status in ('pending', 'receipt_submitted', 'approved',
                                         'rejected', 'expired', 'cancelled')),
+  -- Billing period chosen at checkout. Nullable with a monthly default:
+  -- rows predating this column have no period, and the approval path
+  -- (lib/payments/service.ts) falls back to 30 days when it is absent or
+  -- unrecognised.
+  period              text default 'monthly'
+                      check (period is null or period in ('daily', 'monthly', 'yearly')),
   first_name          text,
   last_name           text,
   phone               text,

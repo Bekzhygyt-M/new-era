@@ -82,6 +82,12 @@ CREATE TABLE IF NOT EXISTS public.payments (
     currency TEXT DEFAULT 'UZS',
     provider TEXT DEFAULT 'click',
     status TEXT DEFAULT 'pending',
+    -- Billing period chosen at checkout. Nullable with a monthly default:
+    -- rows predating this column have no period, and the approval path
+    -- (lib/payments/service.ts) falls back to 30 days when it is absent or
+    -- unrecognised.
+    period TEXT DEFAULT 'monthly'
+        CHECK (period IS NULL OR period IN ('daily', 'monthly', 'yearly')),
     receipt_url TEXT,
     first_name TEXT,
     last_name TEXT,
