@@ -146,13 +146,46 @@ NewEra/
 
 ## ⚙️ Environment Variables
 
-Create `.env.local` in your root directory:
+Create `.env.local` in your root directory (see `.env.local.example` for the annotated version):
 
 ```env
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+SESSION_SECRET=your-session-secret-min-32-chars
+NEXT_PUBLIC_SITE_URL=https://your-app.up.railway.app
 ```
+
+Generate a session secret with:
+
+```bash
+npm run gen:secret
+```
+
+### 🚂 Railway Deployment
+
+The project deploys to Railway via the included `Dockerfile` (Railway is configured
+to use it automatically via `railway.json` — no build command to configure).
+
+**Required environment variables in Railway.** Set these under
+**Project → Variables**. The first three are mandatory; the app will refuse to
+start without `SESSION_SECRET`.
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `SESSION_SECRET` | **Yes** | ≥ 32 characters. Generate with `npm run gen:secret`. The server throws at boot if missing or too short. |
+| `NEXT_PUBLIC_SUPABASE_URL` | **Yes** | Supabase project URL. |
+| `SUPABASE_SERVICE_ROLE_KEY` | **Yes** | Service-role key. Its presence selects the Supabase driver. |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | **Yes** | Browser-safe anon key. |
+| `NEXT_PUBLIC_SITE_URL` | Recommended | Absolute origin, used in certificate and password-reset links. |
+| `DATABASE_DRIVER` | No | `supabase` (default when a service-role key is set) or `local`. Leave unset. |
+
+> **Do not set `DATABASE_DRIVER=local` in production.** That selects the JSON file
+> store, whose contents are wiped on every serverless redeploy.
+
+The image builds with `output: 'standalone'`, runs as the unprivileged `nextjs`
+user, and exposes a healthcheck at `/api/health` (Railway's
+`healthcheckPath`).
 
 ---
 

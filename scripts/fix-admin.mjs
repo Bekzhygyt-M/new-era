@@ -2,7 +2,24 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 
-const password = 'w!_u#A$U_D9eYELj';
+// Read the admin password from the environment. Never hardcode it here:
+// this file is tracked by git, so a literal would be published.
+const password = process.env.ADMIN_PASSWORD;
+
+if (!password) {
+  console.error(
+    'ADMIN_PASSWORD is not set.\n' +
+      'Set it in the environment before running this script, for example:\n' +
+      '  ADMIN_PASSWORD=... node scripts/fix-admin.mjs\n' +
+      '  # or, to load it from .env.local without shell interpretation:\n' +
+      '  node -r dotenv/config scripts/fix-admin.mjs\n' +
+      'Note: do NOT use `node --env-file=.env.local` here — it truncates the\n' +
+      'value at a "#" and would silently derive a different password.\n' +
+      'The value is never printed or logged.'
+  );
+  process.exit(1);
+}
+
 const N = 16384;
 const R = 8;
 const P = 1;

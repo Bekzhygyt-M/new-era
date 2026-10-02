@@ -21,26 +21,40 @@ export type { SessionPayload };
 
 let cachedSecret: string | null = null;
 
+/** Minimum length for a usable session secret. */
+const MIN_SECRET_LENGTH = 32;
+
 /**
  * Session secret resolution:
- *  1. SESSION_SECRET env var (required in production).
+ *  1. SESSION_SECRET env var — REQUIRED in production, no fallback.
  *  2. Development only: a persisted random secret in data/.session-secret,
  *     so restarting `next dev` does not log everyone out.
+ *
+ * In production there is deliberately no derived or hardcoded fallback. This
+ * key signs session cookies, so a guessable or publicly-known value would let
+ * anyone forge an admin session. Failing loudly at boot is far safer than
+ * silently signing sessions with a predictable key.
  */
 function getSecret(): string {
   if (cachedSecret) return cachedSecret;
 
   const fromEnv = process.env.SESSION_SECRET;
-  if (fromEnv && fromEnv.length >= 32) {
+  if (fromEnv && fromEnv.trim().length >= MIN_SECRET_LENGTH) {
     cachedSecret = fromEnv;
     return cachedSecret;
   }
 
   if (process.env.NODE_ENV === 'production') {
-    // Deterministic fallback derived from environment secrets to guarantee no runtime crashes
-    const fallbackSeed = process.env.ADMIN_PASSWORD || process.env.NEXT_PUBLIC_SUPABASE_URL || 'newera-trading-platform-secure-key-2025';
-    cachedSecret = crypto.createHash('sha256').update(`newera-session-secret-${fallbackSeed}`).digest('hex');
-    return cachedSecret;
+    // Refuse to start rather than sign sessions with a weak key. The message
+    // names the variable but never prints its value.
+    const reason = fromEnv
+      ? `it is only ${fromEnv.trim().length} characters (minimum ${MIN_SECRET_LENGTH})`
+      : 'it is not set';
+    throw new Error(
+      `SESSION_SECRET is required in production but ${reason}. ` +
+        'Generate one with "npm run gen:secret" and set it as an environment ' +
+        'variable. Refusing to start rather than fall back to a predictable key.'
+    );
   }
 
   const secretFile = path.join(DB_DIR, '.session-secret');

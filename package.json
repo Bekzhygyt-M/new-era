@@ -6,7 +6,7 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "eslint .",
     "setup:admin": "node scripts/setup-admin.mjs",
     "gen:secret": "node scripts/gen-secret.mjs",
     "typecheck": "tsc --noEmit",
