@@ -100,10 +100,24 @@ export async function login(email: string, password: string): Promise<AuthResult
         (await verifyPassword(parsed.data.password.trim(), profile.password_hash));
     }
 
-    // Fail-safe for master admin matching ADMIN_PASSWORD in environment
-    const envAdminPassword = process.env.ADMIN_PASSWORD;
-    if (cleanEmail === MASTER_ADMIN_EMAIL && envAdminPassword) {
-      if (parsed.data.password === envAdminPassword || parsed.data.password.trim() === envAdminPassword) {
+    // Development-only convenience: allow the master admin to sign in with the
+    // ADMIN_PASSWORD from .env.local and have it re-hashed into the store.
+    //
+    // This is deliberately disabled in production. Comparing a submitted
+    // password against an environment variable makes that variable a standing
+    // plaintext credential: anyone who obtains it (or reads a leaked .env)
+    // can authenticate without ever touching the stored scrypt hash, and the
+    // hash stops being the single source of truth. In production the password
+    // is established once by bootstrapAdminPassword() / ADMIN_PASSWORD_RESET,
+    // after which login is verified against the stored hash only.
+    const isProduction = process.env.NODE_ENV === 'production';
+    if (!isProduction && cleanEmail === MASTER_ADMIN_EMAIL) {
+      const envAdminPassword = process.env.ADMIN_PASSWORD;
+      if (
+        envAdminPassword &&
+        (parsed.data.password === envAdminPassword ||
+          parsed.data.password.trim() === envAdminPassword)
+      ) {
         ok = true;
         const newHash = await hashPassword(envAdminPassword);
         if (profile) {
