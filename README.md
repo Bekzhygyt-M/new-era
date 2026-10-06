@@ -183,6 +183,69 @@ start without `SESSION_SECRET`.
 > **Do not set `DATABASE_DRIVER=local` in production.** That selects the JSON file
 > store, whose contents are wiped on every serverless redeploy.
 
+### 📣 Telegram Private Channel Access (optional)
+
+After an admin approves a payment, the buyer can be given access to the private
+channel matching the product they purchased:
+
+| Purchased product | Channel |
+| --- | --- |
+| `standard` (STANDARD TRADING) | Standard Trading |
+| `pro` (PRO TRADING) | Pro Trading |
+
+The product is resolved from the course slug (`COURSE_IDS` in
+`lib/content/curriculum.ts`) — never from the payment amount or billing period.
+
+**Environment variables** (all three required before the feature activates):
+
+```
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_STANDARD_CHANNEL_ID=
+TELEGRAM_PRO_CHANNEL_ID=
+```
+
+While any of these is unset, payment approval works exactly as before and no
+channel button is rendered. `TELEGRAM_BOT_TOKEN` is server-only — never prefix it
+with `NEXT_PUBLIC_`, which would ship it to the browser.
+
+**Setting up the bot**
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
+   Enter it in the hosting provider's environment settings — **do not paste it
+   into chat, a commit, or a shared document.**
+2. Add the bot as an **administrator** of each private channel with the
+   **"Invite users via link"** permission. Without this,
+   `createChatInviteLink` returns an error and no link is issued.
+3. Set each channel identifier: the numeric id (`-100…`, obtainable e.g. via
+   `getUpdates` after the bot is added) or the channel's `@username`.
+
+**How links behave**
+
+- Each link is created with `member_limit: 1`, so a forwarded link cannot admit
+  a second person.
+- **No expiry is set** — the client decides how long access lasts.
+- Links are cached on the payment row so repeated page loads reuse one link
+  rather than minting a new one each time. This is the additive column in
+  `supabase/migrations/20261002_telegram_invite_link.sql`; the app works without
+  it (links are simply re-minted), but running the migration is recommended.
+
+**Testing safely**
+
+```bash
+npx tsx --test tests/telegram-channel-access.test.ts   # mapping, config, API errors
+npx tsx --test tests/telegram-access-control.test.ts  # access control, idempotency
+```
+
+Both suites stub `fetch`, so no real invite link is ever created and no database
+is touched.
+
+> **Out of scope:** this integration does **not** remove users from channels when
+> a subscription expires, does not monitor membership duration, and does not
+> revoke access automatically. Deciding how long a buyer stays in a channel —
+> and removing them when appropriate — is the client's responsibility.
+
+---
+
 The image builds with `output: 'standalone'`, runs as the unprivileged `nextjs`
 user, and exposes a healthcheck at `/api/health` (Railway's
 `healthcheckPath`).

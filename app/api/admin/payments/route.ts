@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdminApi, apiError } from '@/lib/permissions';
 import { db } from '@/lib/db';
+import { withoutInviteLink } from '@/lib/telegram/channel-access';
 
 export const dynamic = 'force-dynamic';
 
@@ -42,7 +43,8 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      payments,
+      // Admin-facing: never return a buyer's single-member invite link.
+      payments: payments.map(withoutInviteLink),
       counts: {
         all: all.length,
         pending: all.filter((p) => p.status === 'pending').length,
@@ -154,7 +156,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      payment,
+      payment: withoutInviteLink(payment),
       profile,
     });
   } catch (error) {

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAdminApi, apiError } from '@/lib/permissions';
 import { paymentRejectionSchema } from '@/lib/validations';
 import { rejectPayment } from '@/lib/payments/service';
+import { withoutInviteLink } from '@/lib/telegram/channel-access';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,7 +25,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       message: 'To‘lov rad etildi va foydalanuvchi xabardor qilindi.',
-      payment: result.payment,
+      payment: withoutInviteLink(result.payment),
     });
   } catch (error) {
     return apiError(error);

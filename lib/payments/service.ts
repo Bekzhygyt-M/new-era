@@ -1,5 +1,12 @@
 import { db } from '@/lib/db';
 import type { LocalPayment } from '@/lib/local-db';
+import {
+  channelDisplayName,
+  isTelegramConfigured,
+  issueChannelInvite,
+  slugForCourseId,
+  type TelegramChannelSlug,
+} from '@/lib/telegram/channel-access';
 
 /**
  * Payment state transitions.
@@ -66,9 +73,104 @@ export async function approvePayment(orderIdOrId: string, approvedBy: string): P
       amount: result.payment.amount,
       approved_by: approvedBy,
     });
+
+    // Telegram access is best-effort and never gates the approval: the payment
+    // is already approved and enrolled at this point. Routed through the same
+    // single-flight path as the status page, so an approval racing the buyer's
+    // first page load still yields ONE invite, and the notification carries the
+    // exact link that was persisted. If minting fails now, the buyer obtains it
+    // later from the payment page via ensureChannelInvite().
+    const access = await ensureChannelInvite(result.payment);
+    if (access) {
+      await db.addNotification({
+        user_id: result.payment.user_id,
+        title: `${access.channelName} Telegram kanali`,
+        message: `“${access.channelName}” yopiq kanaliga qo‘shilish havolasi tayyor. Havola bitta kishiga mo‘ljallangan — uni boshqa kishaga yubormang.`,
+        type: 'telegram_access',
+        link: access.inviteUrl,
+      });
+    }
   }
 
   return { ok: true, payment: result.payment };
+}
+
+/** Caches the invite on the payment row so repeat polls reuse one link. */
+async function persistInvite(payment: LocalPayment, inviteUrl: string): Promise<void> {
+  try {
+    payment.telegram_invite_link = inviteUrl;
+    await db.savePayment({ id: payment.id, telegram_invite_link: inviteUrl });
+  } catch {
+    // A missing column must not break an approved payment; the link is
+    // simply re-minted on the next request.
+    console.error('[telegram] could not cache invite for payment', payment.id);
+  }
+}
+
+export type ChannelAccess = {
+  slug: TelegramChannelSlug;
+  channelName: string;
+  inviteUrl: string;
+} | null;
+
+/**
+ * In-flight invite creation, keyed by payment id.
+ *
+ * Without this, two overlapping requests for the same payment (approval racing
+ * the status poll, two open tabs) both see "no cached link" and each mint a
+ * separate single-member invite. Concurrent callers in this process now share
+ * one Telegram call and one persisted link.
+ */
+const inviteInFlight = new Map<string, Promise<ChannelAccess>>();
+
+/**
+ * Returns the user's Telegram channel access for an APPROVED payment, minting
+ * the invite on first call and reusing the cached link afterwards.
+ *
+ * Works for payments approved before this feature existed: their first status
+ * request lazily creates and persists the invite.
+ *
+ * Idempotent: sequential calls reuse the persisted link; concurrent calls share
+ * one in-flight creation. Returns null when Telegram is not configured, the
+ * product has no channel, the payment is not approved, or Telegram fails — the
+ * caller then shows the normal payment state and the next request retries.
+ */
+export async function ensureChannelInvite(payment: LocalPayment): Promise<ChannelAccess> {
+  if (payment.status !== 'approved') return null;
+  if (!isTelegramConfigured()) return null;
+
+  const slug = slugForCourseId(payment.course_id);
+  if (!slug) return null;
+
+  const access = (inviteUrl: string): ChannelAccess => ({
+    slug,
+    channelName: channelDisplayName(slug),
+    inviteUrl,
+  });
+
+  if (payment.telegram_invite_link) return access(payment.telegram_invite_link);
+
+  const pending = inviteInFlight.get(payment.id);
+  if (pending) return pending;
+
+  const task = (async (): Promise<ChannelAccess> => {
+    // The caller's row may be stale: another request can have minted and
+    // persisted the link after this one read the payment. Re-read first.
+    const fresh = await db.getPayment(payment.id).catch(() => null);
+    if (fresh?.telegram_invite_link) {
+      payment.telegram_invite_link = fresh.telegram_invite_link;
+      return access(fresh.telegram_invite_link);
+    }
+
+    const invite = await issueChannelInvite(payment);
+    if (!invite.ok) return null;
+
+    await persistInvite(payment, invite.inviteUrl);
+    return access(invite.inviteUrl);
+  })().finally(() => inviteInFlight.delete(payment.id));
+
+  inviteInFlight.set(payment.id, task);
+  return task;
 }
 
 export async function rejectPayment(orderIdOrId: string, reason: string, rejectedBy: string): Promise<TransitionResult> {

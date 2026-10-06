@@ -158,6 +158,14 @@ export interface LocalPayment {
    * dropped it and every plan fell back to 30 days.
    */
   period?: string;
+  /**
+   * Single-member Telegram invite link issued when this payment was approved.
+   *
+   * Cached so repeated status polls reuse one link instead of minting a new
+   * one each time. Optional because the column is additive and may not exist
+   * in an older database yet — absence simply means "not yet issued".
+   */
+  telegram_invite_link?: string | null;
   first_name?: string;
   last_name?: string;
   phone?: string;
@@ -1372,6 +1380,10 @@ export const localDb = {
         // Carry the chosen plan through, matching the Supabase driver. Omitted
         // when absent so existing rows keep their current shape.
         ...(paymentData.period ? { period: paymentData.period } : {}),
+        // Cached Telegram invite; omitted when absent so existing rows are unchanged.
+        ...(paymentData.telegram_invite_link !== undefined
+          ? { telegram_invite_link: paymentData.telegram_invite_link }
+          : {}),
         first_name: paymentData.first_name,
         last_name: paymentData.last_name,
         phone: paymentData.phone,

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdminApi, apiError, ApiError } from '@/lib/permissions';
 import { db } from '@/lib/db';
+import { withoutNotificationInvite } from '@/lib/telegram/channel-access';
 import { broadcastSchema } from '@/lib/validations';
 
 export const dynamic = 'force-dynamic';
@@ -8,7 +9,8 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
   try {
     await requireAdminApi();
-    const notifications = (await db.raw()).notifications.slice(0, 100);
+    // Admin log: never return a buyer's single-member Telegram invite.
+    const notifications = (await db.raw()).notifications.slice(0, 100).map(withoutNotificationInvite);
     return NextResponse.json({ notifications });
   } catch (error) {
     return apiError(error);

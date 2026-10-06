@@ -10,6 +10,7 @@
     "setup:admin": "node scripts/setup-admin.mjs",
     "gen:secret": "node scripts/gen-secret.mjs",
     "typecheck": "tsc --noEmit",
+    "test": "npx --yes tsx --test tests/*.test.ts",
     "supabase:check": "node scripts/supabase-check.mjs",
     "supabase:migrate": "node scripts/supabase-migrate.mjs"
   },

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAdminApi, apiError } from '@/lib/permissions';
 import { paymentApprovalSchema } from '@/lib/validations';
 import { approvePayment } from '@/lib/payments/service';
+import { withoutInviteLink } from '@/lib/telegram/channel-access';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,7 +25,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       message: 'To‘lov tasdiqlandi va kurs ochildi.',
-      payment: result.payment,
+      // Admin-facing: never return the buyer's single-member invite link.
+      payment: withoutInviteLink(result.payment),
     });
   } catch (error) {
     return apiError(error);

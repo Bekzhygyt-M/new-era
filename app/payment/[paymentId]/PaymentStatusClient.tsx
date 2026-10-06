@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Clock, CheckCircle2, XCircle, Loader2, AlertTriangle, Hourglass } from 'lucide-react';
+import { Clock, CheckCircle2, XCircle, Loader2, AlertTriangle, Hourglass, Send } from 'lucide-react';
 
 /**
  * Order status with live polling (TZ §19).
@@ -11,6 +11,13 @@ import { Clock, CheckCircle2, XCircle, Loader2, AlertTriangle, Hourglass } from 
  */
 
 type Status = 'pending' | 'receipt_submitted' | 'approved' | 'rejected' | 'expired' | 'cancelled';
+
+/** Telegram channel access, resolved server-side. Null when unavailable. */
+type TelegramAccess = {
+  slug: 'standard' | 'pro';
+  channelName: string;
+  inviteUrl: string;
+};
 
 interface Props {
   paymentId: string;
@@ -40,6 +47,7 @@ export default function PaymentStatusClient(props: Props) {
   const [remaining, setRemaining] = useState(props.initialRemaining);
   const [reason, setReason] = useState(props.rejectionReason);
   const [enrolled, setEnrolled] = useState(props.initialStatus === 'approved');
+  const [telegram, setTelegram] = useState<TelegramAccess | null>(null);
 
   const poll = useCallback(async () => {
     try {
@@ -51,6 +59,7 @@ export default function PaymentStatusClient(props: Props) {
       setRemaining(data.remainingSeconds);
       setReason(data.rejectionReason);
       setEnrolled(Boolean(data.enrolled));
+      setTelegram(data.telegram ?? null);
 
       if (data.status === 'approved') router.refresh();
     } catch {
@@ -65,6 +74,11 @@ export default function PaymentStatusClient(props: Props) {
     const timer = setInterval(poll, 8000);
     return () => clearInterval(timer);
   }, [poll, status]);
+
+  // Polling stops on approval, so fetch once more to pick up channel access.
+  useEffect(() => {
+    if (status === 'approved') void poll();
+  }, [status, poll]);
 
   useEffect(() => {
     if (status !== 'pending' || remaining <= 0) return;
@@ -128,6 +142,31 @@ export default function PaymentStatusClient(props: Props) {
           </p>
           <p className="text-[13px] leading-relaxed text-white/70">{reason}</p>
         </div>
+      )}
+
+      {/* Telegram channel access — only ever shown for an approved payment,
+          and only the link the server issued for this user's own order. */}
+      {status === 'approved' && telegram && (
+        <section className="rounded-2xl border border-sky-400/25 bg-sky-400/[0.06] p-5">
+          <p className="mb-3 text-[11px] font-black uppercase tracking-wider text-sky-300">
+            Yopiq Telegram kanal
+          </p>
+          <a
+            href={telegram.inviteUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-sky-400 py-3.5 text-[11px] font-black uppercase tracking-wider text-black transition hover:bg-sky-300"
+          >
+            <Send size={15} />
+            {telegram.slug === 'pro'
+              ? 'Pro Trading kanaliga qo‘shilish'
+              : 'Standard Trading kanaliga qo‘shilish'}
+          </a>
+          <p className="mt-3 text-[12px] leading-relaxed text-white/50">
+            Bu havola faqat sizga mo‘ljallangan. Uni boshqa kishaga yubormang.
+            Kanalga qo‘shilganingizdan keyin alohida xabar berilmaydi.
+          </p>
+        </section>
       )}
 
       <div className="flex flex-col gap-2.5 sm:flex-row">

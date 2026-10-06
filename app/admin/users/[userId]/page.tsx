@@ -1,5 +1,6 @@
 import { notFound } from 'next/navigation';
 import { db } from '@/lib/db';
+import { withoutInviteLink } from '@/lib/telegram/channel-access';
 import { requireAdminPage } from '@/lib/permissions';
 import AdminUserDetailClient from './AdminUserDetailClient';
 
@@ -13,7 +14,8 @@ export default async function AdminUserDetailPage({ params }: { params: Promise<
   const profile = await db.getProfile(userId);
   if (!profile) notFound();
 
-  const payments = await db.getPayments(profile.id);
+  // Admin view: never embed a buyer's single-member invite link.
+  const payments = (await db.getPayments(profile.id)).map(withoutInviteLink);
   const courses = await db.getCourses();
 
   return (

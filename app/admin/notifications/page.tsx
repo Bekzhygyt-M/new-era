@@ -1,5 +1,6 @@
 import AdminNotificationsClient from './AdminNotificationsClient';
 import { db } from '@/lib/db';
+import { withoutNotificationInvite } from '@/lib/telegram/channel-access';
 import { requireAdminPage } from '@/lib/permissions';
 
 export const dynamic = 'force-dynamic';
@@ -10,7 +11,8 @@ export default async function AdminNotificationsPage() {
   // Real notification log (TZ §21, §31).
   const notifications = await Promise.all(
     (await db.raw()).notifications.slice(0, 100).map(async (n) => ({
-      ...n,
+      // Admin log: never show a buyer's single-member Telegram invite.
+      ...withoutNotificationInvite(n),
       recipient:
         n.user_id === 'all'
           ? 'Barcha talabalar'

@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS public.payments (
     -- value is absent or unrecognised. See lib/validations for the enum.
     period TEXT DEFAULT 'monthly'
         CHECK (period IS NULL OR period IN ('daily', 'monthly', 'yearly')),
+    -- Cached single-member Telegram invite link issued on approval.
+    telegram_invite_link TEXT,
     receipt_url TEXT,
     first_name TEXT,
     last_name TEXT,

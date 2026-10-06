@@ -347,6 +347,9 @@ create table if not exists public.payments (
   -- unrecognised.
   period              text default 'monthly'
                       check (period is null or period in ('daily', 'monthly', 'yearly')),
+  -- Cached single-member Telegram invite link issued on approval. Nullable;
+  -- NULL means no link has been issued (or Telegram is not configured).
+  telegram_invite_link text,
   first_name          text,
   last_name           text,
   phone               text,

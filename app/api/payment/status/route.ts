@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireUserApi, apiError, ApiError } from '@/lib/permissions';
 import { db } from '@/lib/db';
-import { isExpired, remainingSeconds } from '@/lib/payments/service';
+import { isExpired, remainingSeconds, ensureChannelInvite } from '@/lib/payments/service';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,6 +29,13 @@ export async function GET(request: NextRequest) {
       payment.status = 'expired';
     }
 
+    // Telegram channel access is for the BUYER only. The invite is single-member,
+    // so an admin viewing someone else's order must neither mint it nor see it —
+    // either would use up the buyer's seat. Admins still get the full status.
+    // Runs after the ownership check above, for approved payments only.
+    const isBuyer = payment.user_id === auth.profile.id;
+    const channelAccess = isBuyer ? await ensureChannelInvite(payment) : null;
+
     return NextResponse.json({
       id: payment.id,
       orderId: payment.order_id,
@@ -44,6 +51,13 @@ export async function GET(request: NextRequest) {
       rejectedAt: payment.rejected_at || null,
       rejectionReason: payment.rejection_reason || null,
       enrolled: await db.hasEnrollment(payment.user_id, payment.course_id),
+      telegram: channelAccess
+        ? {
+            slug: channelAccess.slug,
+            channelName: channelAccess.channelName,
+            inviteUrl: channelAccess.inviteUrl,
+          }
+        : null,
     });
   } catch (error) {
     return apiError(error);

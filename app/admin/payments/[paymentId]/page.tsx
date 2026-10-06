@@ -2,6 +2,7 @@ import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import { db } from '@/lib/db';
+import { withoutInviteLink } from '@/lib/telegram/channel-access';
 import { requireAdminPage } from '@/lib/permissions';
 import AdminPaymentsClient from '../AdminPaymentsClient';
 
@@ -24,7 +25,7 @@ export default async function AdminPaymentDetailPage({ params }: { params: Promi
         <ChevronLeft size={16} /> Barcha to&apos;lovlar ro&apos;yxatiga qaytish
       </Link>
 
-      <AdminPaymentsClient initialPayments={[payment]} />
+      <AdminPaymentsClient initialPayments={[withoutInviteLink(payment)]} />
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { db } from '@/lib/db';
+import { withoutInviteLink } from '@/lib/telegram/channel-access';
 import { requireAdminPage } from '@/lib/permissions';
 import AdminAnalyticsClient from './AdminAnalyticsClient';
 
@@ -9,7 +10,8 @@ export default async function AdminAnalyticsPage() {
 
   // TZ §31 — every figure is computed from stored records, never sampled.
   const profiles = await db.getProfiles();
-  const payments = await db.getPayments();
+  // Admin view: never embed a buyer's single-member invite link.
+  const payments = (await db.getPayments()).map(withoutInviteLink);
   const progress = (await db.raw()).lesson_progress;
   const testAttempts = await db.getAllAttempts();
 
