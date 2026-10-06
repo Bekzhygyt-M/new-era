@@ -810,7 +810,20 @@
     "title": "Mening kurslarim",
     "catalogLink": "Yangi kurslar katalogi",
     "adminAccess": "ADMIN ACCESS",
-    "goToLessons": "Darslarga o‘tish"
+    "goToLessons": "Darslarga o‘tish",
+    "ordersTitle": "Buyurtmalarim",
+    "ordersSubtitle": "To‘lovlaringiz holati va kursga kirish. Buyurtmani ochish uchun tugmani bosing.",
+    "orderNumber": "Buyurtma",
+    "openOrder": "Buyurtmani ochish",
+    "openAccess": "Kirish va Telegram",
+    "status": {
+      "pending": "To‘lov kutilmoqda",
+      "receipt_submitted": "Tekshirilmoqda",
+      "approved": "Tasdiqlandi",
+      "rejected": "Rad etildi",
+      "expired": "Muddati tugadi",
+      "cancelled": "Bekor qilindi"
+    }
   },
   "messages": {
     "title": "Xabarlar va muloqot",

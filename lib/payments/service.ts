@@ -33,6 +33,50 @@ export function remainingSeconds(payment: LocalPayment): number {
   return Math.max(0, Math.floor((new Date(payment.expires_at).getTime() - Date.now()) / 1000));
 }
 
+/** One row of the buyer's own order list ("Kurslarim" → "Buyurtmalarim"). */
+export interface BuyerOrder {
+  id: string;
+  orderId: string;
+  courseId: string;
+  courseTitle: string | null;
+  status: LocalPayment['status'];
+  amount: number;
+  currency: string;
+  createdAt: string;
+  /** The buyer's own status / Telegram-access page. */
+  href: string;
+}
+
+/**
+ * The signed-in buyer's own orders, newest first.
+ *
+ * Scoped by the caller's verified profile id at the query itself
+ * (`db.getPayments(userId)`), so it can never return another user's payment.
+ * Read-only: an overdue unpaid order is *shown* as expired, but nothing is
+ * written here. Only a still-open `pending` order can display as expired — a
+ * rejected, cancelled or approved order keeps its own status even after its
+ * payment window has passed. Deliberately omits the Telegram invite link —
+ * that is only ever resolved on the payment page, for its buyer, by
+ * ensureChannelInvite().
+ */
+export async function listBuyerOrders(userId: string): Promise<BuyerOrder[]> {
+  if (!userId) return [];
+  const payments = await db.getPayments(userId);
+  return payments
+    .filter((p) => p.user_id === userId)
+    .map((p) => ({
+      id: p.id,
+      orderId: p.order_id,
+      courseId: p.course_id,
+      courseTitle: p.courses?.title ?? null,
+      status: p.status === 'pending' && isExpired(p) ? 'expired' : p.status,
+      amount: p.amount,
+      currency: p.currency,
+      createdAt: p.created_at,
+      href: `/payment/${encodeURIComponent(p.id)}`,
+    }));
+}
+
 type PlanPeriod = 'daily' | 'monthly' | 'yearly';
 
 function getPaymentPeriod(payment: LocalPayment): PlanPeriod | undefined {

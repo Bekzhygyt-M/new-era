@@ -810,7 +810,20 @@
     "title": "Мои курсы",
     "catalogLink": "Каталог новых курсов",
     "adminAccess": "ДОСТУП АДМИНА",
-    "goToLessons": "Перейти к урокам"
+    "goToLessons": "Перейти к урокам",
+    "ordersTitle": "Мои заказы",
+    "ordersSubtitle": "Статус ваших оплат и доступ к курсу. Нажмите кнопку, чтобы открыть заказ.",
+    "orderNumber": "Заказ",
+    "openOrder": "Открыть заказ",
+    "openAccess": "Доступ и Telegram",
+    "status": {
+      "pending": "Ожидает оплаты",
+      "receipt_submitted": "На проверке",
+      "approved": "Подтверждён",
+      "rejected": "Отклонён",
+      "expired": "Срок истёк",
+      "cancelled": "Отменён"
+    }
   },
   "messages": {
     "title": "Сообщения и общение",

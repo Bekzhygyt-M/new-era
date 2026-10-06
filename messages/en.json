@@ -810,7 +810,20 @@
     "title": "My courses",
     "catalogLink": "Browse the catalogue",
     "adminAccess": "ADMIN ACCESS",
-    "goToLessons": "Go to lessons"
+    "goToLessons": "Go to lessons",
+    "ordersTitle": "My orders",
+    "ordersSubtitle": "Your payment status and course access. Tap the button to open an order.",
+    "orderNumber": "Order",
+    "openOrder": "Open order",
+    "openAccess": "Access & Telegram",
+    "status": {
+      "pending": "Awaiting payment",
+      "receipt_submitted": "Under review",
+      "approved": "Approved",
+      "rejected": "Rejected",
+      "expired": "Expired",
+      "cancelled": "Cancelled"
+    }
   },
   "messages": {
     "title": "Messages",
