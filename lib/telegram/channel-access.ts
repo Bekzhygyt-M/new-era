@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { COURSE_IDS } from '@/lib/content/curriculum';
 import type { LocalPayment } from '@/lib/local-db';
 
@@ -154,6 +155,43 @@ export function telegramErrorSummary(
   return { errorCode, description: description || '(none)' };
 }
 
+/** Host and path template of the invite call — never the tokenized URL. */
+const INVITE_ENDPOINT = 'api.telegram.org/bot<token>/createChatInviteLink';
+
+/** First 10 hex chars of SHA-256: comparable between environments, not reversible to the token. */
+function fingerprint(value: unknown): string {
+  return createHash('sha256').update(String(value)).digest('hex').slice(0, 10);
+}
+
+/**
+ * DIAGNOSTIC: safe metadata about the request that just failed, so the values
+ * the production server actually used can be compared with a local run
+ * without ever revealing them. Contains only types, lengths, format checks
+ * and truncated SHA-256 fingerprints — never the chat id, the token, the
+ * tokenized URL or the request body.
+ */
+export function inviteRequestDiagnostics(
+  slug: string,
+  chatId: unknown,
+  token: unknown,
+  inviteName: string
+): string {
+  const chat = String(chatId);
+  const tok = String(token);
+  return [
+    `slug=${slug}`,
+    `chat_id_type=${typeof chatId}`,
+    `chat_id_sha256=${fingerprint(chatId)}`,
+    `chat_id_len=${chat.length}`,
+    `chat_id_format_ok=${/^-100\d+$/.test(chat)}`,
+    `token_sha256=${fingerprint(token)}`,
+    `token_len=${tok.length}`,
+    `token_outer_whitespace=${tok !== tok.trim()}`,
+    `invite_name_len=${inviteName.length}`,
+    `endpoint=${INVITE_ENDPOINT}`,
+  ].join(' ');
+}
+
 type TelegramApiResponse = { ok?: boolean; result?: { invite_link?: string }; description?: string };
 
 /**
@@ -181,6 +219,11 @@ export async function issueChannelInvite(payment: LocalPayment): Promise<Telegra
     return { ok: false, reason: 'not_configured', message: 'Telegram kanaliga kirish sozlanmagan' };
   }
 
+  const inviteName = inviteLinkName(payment);
+  // DIAGNOSTIC: logged only on failure, see inviteRequestDiagnostics().
+  const logRequestDiagnostics = () =>
+    console.error('[telegram] createChatInviteLink request diagnostics |', inviteRequestDiagnostics(slug, channelId, token, inviteName));
+
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/createChatInviteLink`, {
       method: 'POST',
@@ -189,7 +232,7 @@ export async function issueChannelInvite(payment: LocalPayment): Promise<Telegra
         chat_id: channelId,
         // One member only, so a forwarded link cannot admit a second person.
         member_limit: 1,
-        name: inviteLinkName(payment),
+        name: inviteName,
       }),
       cache: 'no-store',
     });
@@ -199,6 +242,7 @@ export async function issueChannelInvite(payment: LocalPayment): Promise<Telegra
       console.error('[telegram] createChatInviteLink failed with HTTP', res.status, 'for', slug);
       const detail = telegramErrorSummary(await res.text().catch(() => ''), [token, channelId]);
       console.error('[telegram] createChatInviteLink error for', slug, '| error_code:', detail.errorCode, '| description:', detail.description);
+      logRequestDiagnostics();
       return { ok: false, reason: 'api_error', message: 'Telegram bilan bog‘lanishda xatolik' };
     }
 
@@ -210,12 +254,14 @@ export async function issueChannelInvite(payment: LocalPayment): Promise<Telegra
       console.error('[telegram] createChatInviteLink rejected for', slug);
       const detail = telegramErrorSummary(data, [token, channelId]);
       console.error('[telegram] createChatInviteLink error for', slug, '| error_code:', detail.errorCode, '| description:', detail.description);
+      logRequestDiagnostics();
       return { ok: false, reason: 'api_error', message: 'Telegram havolasi yaratilmadi' };
     }
 
     return { ok: true, inviteUrl, slug, reused: false };
   } catch {
     console.error('[telegram] createChatInviteLink threw for', slug);
+    logRequestDiagnostics();
     return { ok: false, reason: 'api_error', message: 'Telegram bilan bog‘lanishda xatolik' };
   }
 }

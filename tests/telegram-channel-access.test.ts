@@ -277,7 +277,10 @@ function assertNoSecrets(log: string) {
   assert.equal(log.includes('AAHsuperSecretBotTokenValue'), false, 'token fragment leaked');
   assert.equal(log.includes(SECRET_CHANNEL), false, 'channel id leaked');
   assert.equal(log.includes('9876543210'), false, 'channel id digits leaked');
-  assert.equal(/t\.me|telegram\.me|https?:\/\/|api\.telegram\.org/i.test(log), false, 'URL / invite leaked');
+  // The only permitted endpoint reference is the token-free template in the diagnostics line.
+  const withoutTemplate = log.split('endpoint=api.telegram.org/bot<token>/createChatInviteLink').join('');
+  assert.equal(/t\.me|telegram\.me|https?:\/\/|api\.telegram\.org/i.test(withoutTemplate), false, 'URL / invite leaked');
+  assert.equal(/\/bot\d/.test(log), false, 'tokenized path leaked');
   assert.equal(log.includes('access-'), false, 'request body (invite name) leaked');
   assert.equal(log.includes('pay_1') || log.includes('NE-1') || log.includes('u1@'), false, 'payment/user data leaked');
 }
@@ -339,5 +342,48 @@ test('telegramErrorSummary: shortens long descriptions and never throws', async 
     assert.equal(typeof out.description, 'string');
   }
   assert.equal(mod.telegramErrorSummary('{"error_code":"400"}').errorCode, null, 'non-numeric code ignored');
+  mock.restoreAll();
+});
+
+// ─── Request diagnostics on failure (fingerprints only) ─────────────────────
+
+test('failure logs request diagnostics with fingerprints only — never the chat_id or token', async () => {
+  const { createHash } = await import('node:crypto');
+  const sha = (v: string) => createHash('sha256').update(v).digest('hex').slice(0, 10);
+  const { mod } = await load(
+    { TELEGRAM_BOT_TOKEN: SECRET_TOKEN, TELEGRAM_STANDARD_CHANNEL_ID: SECRET_CHANNEL, TELEGRAM_PRO_CHANNEL_ID: '-1001111111111' },
+    () => new Response(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: chat not found' }), { status: 400 })
+  );
+  const log = await captureErrors(() => mod.issueChannelInvite(payment({ id: '9b2f4c1e-7a3d-4e8b-9c6f-2d1a0e5b7c93', order_id: 'NE-20261007-A1B2C3' })));
+  mock.restoreAll();
+
+  const line = log.split('\n').find((l) => l.includes('request diagnostics')) ?? '';
+  assert.ok(line, 'diagnostics line is written on failure');
+  for (const part of [
+    'slug=standard', 'chat_id_type=string', `chat_id_sha256=${sha(SECRET_CHANNEL)}`, `chat_id_len=${SECRET_CHANNEL.length}`,
+    'chat_id_format_ok=true', `token_sha256=${sha(SECRET_TOKEN)}`, `token_len=${SECRET_TOKEN.length}`,
+    'token_outer_whitespace=false', 'invite_name_len=25', 'endpoint=api.telegram.org/bot<token>/createChatInviteLink',
+  ]) assert.ok(line.includes(part), `missing ${part} in: ${line}`);
+
+  // Never the real values, the tokenized URL or the request body.
+  assert.equal(log.includes(SECRET_TOKEN), false, 'token leaked');
+  assert.equal(log.includes(SECRET_TOKEN.split(':')[1]), false, 'token secret part leaked');
+  assert.equal(log.includes(SECRET_CHANNEL), false, 'chat_id leaked');
+  assert.equal(log.includes(SECRET_CHANNEL.replace('-', '')), false, 'chat_id digits leaked');
+  assert.equal(/https?:\/\//.test(log), false, 'URL leaked');
+  assert.equal(/member_limit|"name"|access-NE|NE-20261007|9b2f4c1e/.test(log), false, 'request body / payment data leaked');
+});
+
+test('diagnostics flag a malformed chat_id and a whitespace-padded token without revealing them', async () => {
+  const { mod } = await load({});
+  const out = mod.inviteRequestDiagnostics('pro', ' -100123 ', ` ${SECRET_TOKEN}\n`, 'access-x');
+  assert.match(out, /chat_id_format_ok=false/);
+  assert.match(out, /token_outer_whitespace=true/);
+  assert.match(out, new RegExp(`token_len=${SECRET_TOKEN.length + 2} `), 'length of the raw, padded value');
+  assert.equal(out.includes(SECRET_TOKEN), false);
+  assert.equal(out.includes('-100123'), false);
+  const num = mod.inviteRequestDiagnostics('pro', -1001234567890, SECRET_TOKEN, 'n');
+  assert.match(num, /chat_id_type=number/);
+  assert.equal(num.includes('1234567890'), false);
   mock.restoreAll();
 });
