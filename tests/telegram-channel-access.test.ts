@@ -215,3 +215,46 @@ test('bot token never appears in the returned value or error message', async () 
   const r = await mod.issueChannelInvite(payment());
   assert.equal(JSON.stringify(r).includes('super-secret-token-value'), false);
 });
+// ─── Invite name length (production regression) ─────────────────────────────
+// Telegram rejects createChatInviteLink when `name` exceeds 32 characters.
+// Production payment ids are 36-character UUIDs, so `access-<uuid>` (43 chars)
+// failed every real request while short test ids passed.
+
+const REAL_UUID = '9b2f4c1e-7a3d-4e8b-9c6f-2d1a0e5b7c93';
+
+test('real 36-char UUID payment id: invite name is <= 32 chars and uses the order number', async () => {
+  assert.equal(REAL_UUID.length, 36);
+  const { mod, calls } = await load(
+    { TELEGRAM_BOT_TOKEN: 'stub-token', TELEGRAM_STANDARD_CHANNEL_ID: '-100std', TELEGRAM_PRO_CHANNEL_ID: '-100pro' },
+    () => new Response(JSON.stringify({ ok: true, result: okInvite }), { status: 200 })
+  );
+  for (const course of [STANDARD, PRO]) {
+    const r = await mod.issueChannelInvite(payment({ id: REAL_UUID, order_id: 'NE-20261007-A1B2C3', course_id: course }));
+    assert.equal(r.ok, true);
+  }
+  assert.equal(calls.length, 2);
+  for (const c of calls) {
+    assert.ok(c.body.name!.length <= 32, `name too long: ${c.body.name!.length}`);
+    assert.equal(c.body.name, 'access-NE-20261007-A1B2C3');
+    assert.equal(c.body.member_limit, 1);
+  }
+  mock.restoreAll();
+});
+
+test('invite name is deterministic and always <= 32 chars, whatever the ids look like', async () => {
+  const { mod } = await load({});
+  const cases = [
+    { id: REAL_UUID, order_id: 'NE-20261007-A1B2C3' },
+    { id: REAL_UUID, order_id: '' }, // missing order number → clipped UUID
+    { id: REAL_UUID, order_id: 'NE-' + 'X'.repeat(80) }, // pathological order number
+    { id: 'pay_mulh9h5j8d1e8n', order_id: 'NE-20260901-ZZZZZZ' }, // local-driver ids
+  ];
+  for (const c of cases) {
+    const a = mod.inviteLinkName(c);
+    assert.ok(a.length <= mod.INVITE_NAME_MAX && a.length <= 32, `${a} (${a.length})`);
+    assert.ok(a.startsWith('access-'));
+    assert.equal(mod.inviteLinkName(c), a, 'same payment → same name');
+  }
+  assert.equal(mod.inviteLinkName({ id: REAL_UUID, order_id: '' }), `access-${REAL_UUID}`.slice(0, 32));
+  mock.restoreAll();
+});

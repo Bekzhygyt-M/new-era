@@ -32,7 +32,7 @@ test('status route never touches Telegram', () => {
 
 test('access route: session first, then id validation, then the central decision', () => {
   const auth = access.indexOf('await getAuth()');
-  const unauth = access.indexOf('if (!auth) return to(request, `/login');
+  const unauth = access.indexOf('if (!auth) return to(`/login');
   const uuid = access.indexOf('if (!UUID.test(courseId))');
   const decide = access.indexOf('getCourseAccess(auth.profile.id, courseId');
   assert.ok(auth > -1 && unauth > auth && uuid > unauth && decide > uuid);

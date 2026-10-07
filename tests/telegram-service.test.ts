@@ -15,6 +15,9 @@ import path from 'node:path';
 
 const STD = '11111111-1111-1111-1111-111111111111';
 const PRO = '22222222-2222-2222-2222-222222222222';
+// Production payment ids are 36-character UUIDs.
+const UUID_STD = '9b2f4c1e-7a3d-4e8b-9c6f-2d1a0e5b7c93';
+const UUID_PRO = 'c0ffee00-1234-4abc-8def-0123456789ab';
 
 // Must be set BEFORE the db module loads: it resolves its data dir on import.
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'newera-tg-test-'));
@@ -27,7 +30,7 @@ type Db = typeof import('../lib/db')['db'];
 let svc: Svc;
 let db: Db;
 
-let mints: { chat_id: string; member_limit: number }[] = [];
+let mints: { chat_id: string; member_limit: number; name?: string }[] = [];
 let revokes: { chat_id: string; invite_link: string }[] = [];
 let telegramMode: 'ok' | 'fail' = 'ok';
 
@@ -40,7 +43,11 @@ globalThis.fetch = (async (input: unknown, init?: { body?: string }) => {
     revokes.push({ chat_id: body.chat_id, invite_link: body.invite_link });
     return new Response('{"ok":true,"result":{}}', { status: 200 });
   }
-  mints.push({ chat_id: body.chat_id, member_limit: body.member_limit });
+  mints.push({ chat_id: body.chat_id, member_limit: body.member_limit, name: body.name });
+  // Mirror the real API: names over 32 characters are rejected with HTTP 400.
+  if (typeof body.name === 'string' && body.name.length > 32) {
+    return new Response('{"ok":false,"error_code":400,"description":"Bad Request: invite link name is too long"}', { status: 400 });
+  }
   if (telegramMode === 'fail') return new Response('{"ok":false}', { status: 500 });
   return new Response(
     JSON.stringify({ ok: true, result: { invite_link: `https://t.me/+stubInvite${mints.length}` } }),
@@ -76,12 +83,17 @@ function seed() {
       // u4: enrolled (e.g. admin grant) but no approved payment at all.
       // u5: enrollment whose access window has ended.
       { ...base, user_id: 'u5', id: 's-exp', order_id: 'T-9', course_id: STD, status: 'approved', approved_at: now },
+      // u6: production-shaped rows — 36-character UUID ids, real order numbers.
+      { ...base, user_id: 'u6', id: UUID_STD, order_id: 'NE-20261007-A1B2C3', course_id: STD, status: 'approved', approved_at: now },
+      { ...base, user_id: 'u6', id: UUID_PRO, order_id: 'NE-20261007-D4E5F6', course_id: PRO, status: 'approved', approved_at: now },
     ],
     enrollments: [
       { id: 'e2s', user_id: 'u2', course_id: STD, status: 'active', purchased_at: now, expires_at: future, source: 'payment' },
       { id: 'e2p', user_id: 'u2', course_id: PRO, status: 'active', purchased_at: now, expires_at: future, source: 'payment' },
       { id: 'e3s', user_id: 'u3', course_id: STD, status: 'active', purchased_at: now, expires_at: future, source: 'payment' },
       { id: 'e4s', user_id: 'u4', course_id: STD, status: 'active', purchased_at: now, expires_at: future, source: 'admin' },
+      { id: 'e6s', user_id: 'u6', course_id: STD, status: 'active', purchased_at: now, expires_at: future, source: 'payment' },
+      { id: 'e6p', user_id: 'u6', course_id: PRO, status: 'active', purchased_at: now, expires_at: future, source: 'payment' },
       { id: 'e5s', user_id: 'u5', course_id: STD, status: 'active', purchased_at: now,
         expires_at: new Date(Date.now() - 3600e3).toISOString(), source: 'payment' },
     ],
@@ -312,4 +324,21 @@ test('access: a corrupted / non-invite stored value is never returned; it is rep
   assert.ok(r.ok && /^https:\/\/t\.me\/\+stubInvite/.test(r.href));
   assert.equal(mints.length, 1);
   assert.equal(revokes.length, 0, 'an unsafe value is not sent to Telegram for revocation');
+});
+
+test('access: production-shaped 36-char UUID payments mint successfully (name <= 32), Standard and Pro', async () => {
+  assert.equal(UUID_STD.length, 36);
+  const std = await svc.getCourseAccess('u6', STD, { mint: true });
+  const pro = await svc.getCourseAccess('u6', PRO, { mint: true });
+  assert.ok(std.ok && std.delivery === 'telegram', `Standard denied: ${JSON.stringify(!std.ok && std.reason)}`);
+  assert.ok(pro.ok && pro.delivery === 'telegram', `Pro denied: ${JSON.stringify(!pro.ok && pro.reason)}`);
+  assert.deepEqual(mints.map((m) => m.chat_id), ['-100std', '-100pro']);
+  assert.deepEqual(mints.map((m) => m.name), ['access-NE-20261007-A1B2C3', 'access-NE-20261007-D4E5F6']);
+  assert.ok(mints.every((m) => (m.name ?? '').length <= 32));
+  assert.match(std.ok ? std.href : '', /^https:\/\/t\.me\/\+/);
+  assert.equal((await db.getPayment(UUID_STD))!.telegram_invite_link, std.ok && std.href);
+  // Idempotent on reload.
+  await svc.getCourseAccess('u6', STD, { mint: true });
+  await svc.getCourseAccess('u6', PRO, { mint: true });
+  assert.equal(mints.length, 2);
 });

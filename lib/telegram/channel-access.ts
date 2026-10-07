@@ -93,6 +93,20 @@ export function withoutNotificationInvite<T extends { type?: string; link?: stri
   return notification.type === 'telegram_access' ? { ...notification, link: null } : notification;
 }
 
+/** Telegram rejects an invite link `name` longer than 32 characters. */
+export const INVITE_NAME_MAX = 32;
+
+/**
+ * Deterministic, human-readable label shown to channel admins next to the
+ * invite. Uses the order number (e.g. `NE-20261007-ABC123`); a raw payment
+ * UUID would make `access-<uuid>` 43 characters, which Telegram refuses.
+ * Always clipped to the API limit, whatever the stored ids look like.
+ */
+export function inviteLinkName(payment: Pick<LocalPayment, 'id' | 'order_id'>): string {
+  const ref = (payment.order_id || payment.id || '').trim();
+  return `access-${ref}`.slice(0, INVITE_NAME_MAX);
+}
+
 type TelegramApiResponse = { ok?: boolean; result?: { invite_link?: string }; description?: string };
 
 /**
@@ -128,7 +142,7 @@ export async function issueChannelInvite(payment: LocalPayment): Promise<Telegra
         chat_id: channelId,
         // One member only, so a forwarded link cannot admit a second person.
         member_limit: 1,
-        name: `access-${payment.id}`.slice(0, 64),
+        name: inviteLinkName(payment),
       }),
       cache: 'no-store',
     });

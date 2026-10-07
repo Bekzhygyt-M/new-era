@@ -3,6 +3,7 @@ import { getAuth } from '@/lib/permissions';
 import { getCourseAccess } from '@/lib/payments/service';
 import { rateLimit } from '@/lib/rate-limit';
 import { isSafeInviteUrl } from '@/lib/telegram/channel-access';
+import { relativeRedirect } from '@/lib/http/relative-redirect';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,8 +16,9 @@ const PRIVATE = {
   'X-Robots-Tag': 'noindex, nofollow',
 };
 
-function to(request: NextRequest, path: string) {
-  return NextResponse.redirect(new URL(path, request.url), { status: 303, headers: PRIVATE });
+/** Same-site redirect with a relative Location (see lib/http/relative-redirect). */
+function to(path: string) {
+  return relativeRedirect(path, PRIVATE);
 }
 
 /**
@@ -45,9 +47,9 @@ function to(request: NextRequest, path: string) {
 export async function GET(request: NextRequest, { params }: { params: Promise<{ courseId: string }> }) {
   const { courseId } = await params;
   const auth = await getAuth();
-  if (!auth) return to(request, `/login?returnTo=${encodeURIComponent('/dashboard')}`);
+  if (!auth) return to(`/login?returnTo=${encodeURIComponent('/dashboard')}`);
 
-  if (!UUID.test(courseId)) return to(request, '/dashboard?access=no_access');
+  if (!UUID.test(courseId)) return to('/dashboard?access=no_access');
 
   const replace = new URL(request.url).searchParams.get('retry') === '1';
   // Bounded either way: ordinary clicks reuse the stored link (no Telegram
@@ -55,18 +57,18 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const limit = replace
     ? rateLimit(`course-access:replace:${auth.profile.id}:${courseId}`, 3, 60 * 60 * 1000)
     : rateLimit(`course-access:${auth.profile.id}`, 30, 60 * 1000);
-  if (!limit.ok) return to(request, `/dashboard?access=rate_limited&course=${courseId}`);
+  if (!limit.ok) return to(`/dashboard?access=rate_limited&course=${courseId}`);
 
   const decision = await getCourseAccess(auth.profile.id, courseId, { mint: true, replace });
 
-  if (!decision.ok) return to(request, `/dashboard?access=${decision.reason}&course=${courseId}`);
+  if (!decision.ok) return to(`/dashboard?access=${decision.reason}&course=${courseId}`);
 
-  if (decision.delivery === 'web') return to(request, decision.href);
+  if (decision.delivery === 'web') return to(decision.href);
 
   // Last line of defence: only ever redirect to a private Telegram invite.
   if (!isSafeInviteUrl(decision.href)) {
     console.error('[course-access] refused to redirect to a non-invite URL for course', courseId);
-    return to(request, `/dashboard?access=telegram_error&course=${courseId}`);
+    return to(`/dashboard?access=telegram_error&course=${courseId}`);
   }
 
   return NextResponse.redirect(decision.href, { status: 303, headers: PRIVATE });
