@@ -26,25 +26,79 @@ import Navbar from '@/components/navbar/Navbar';
 import Footer from '@/components/footer/Footer';
 import { requireUserPage } from '@/lib/permissions';
 import { db } from '@/lib/db';
-import { getOverallProgress, getCourseStatus } from '@/lib/learning';
+import { getOverallProgress, loadSharedLearningData } from '@/lib/learning';
+import { courseAccessLink } from '@/lib/payments/service';
 
 export const dynamic = 'force-dynamic';
 
-/** Student dashboard. Shows exact 30-day course limit, remaining days countdown, and learning progress. */
-export default async function DashboardPage() {
-  const auth = await requireUserPage('/dashboard');
-  const { t } = await getTranslations();
-  const { profile } = auth;
+/** Outcomes the access route can send back; anything else is ignored. */
+const ACCESS_NOTICES: Record<string, { tone: 'warn' | 'error'; title: string; body: string; retry?: boolean }> = {
+  telegram_error: {
+    tone: 'error',
+    title: 'Telegram bilan bog‘lanib bo‘lmadi',
+    body: 'Kirish havolasini hozir olib bo‘lmadi. To‘lovingiz va kursingiz saqlangan — bir ozdan so‘ng qayta urinib ko‘ring.',
+    retry: true,
+  },
+  not_configured: {
+    tone: 'warn',
+    title: 'Telegram kanaliga kirish hali sozlanmagan',
+    body: 'Kursingiz faol. Kanalga kirish yoqilishi bilan shu tugma orqali kirishingiz mumkin bo‘ladi.',
+  },
+  no_payment: {
+    tone: 'warn',
+    title: 'Tasdiqlangan to‘lov topilmadi',
+    body: 'Kanalga kirish uchun tasdiqlangan to‘lov kerak. Muammo bo‘lsa, yordam bo‘limiga yozing.',
+  },
+  expired: {
+    tone: 'warn',
+    title: 'Kursga kirish muddati tugagan',
+    body: 'Davom etish uchun tarifni qayta faollashtiring.',
+  },
+  no_access: {
+    tone: 'warn',
+    title: 'Bu kursga kirish huquqingiz yo‘q',
+    body: 'Kursni sotib olganingizdan va to‘lov tasdiqlanganidan so‘ng kirish ochiladi.',
+  },
+  rate_limited: {
+    tone: 'warn',
+    title: 'Juda ko‘p urinish',
+    body: 'Bir ozdan so‘ng qayta urinib ko‘ring.',
+  },
+};
 
-  const settings = await db.getSettings();
-  const overall = await getOverallProgress(profile.id);
-  const enrollments = await db.getEnrollments(profile.id);
-  const notifications = await db.getNotifications(profile.id);
+/** Student dashboard. Shows exact 30-day course limit, remaining days countdown, and learning progress. */
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ access?: string; course?: string }>;
+}) {
+  const auth = await requireUserPage('/dashboard');
+  const { profile } = auth;
+  const query = (await searchParams) || {};
+
+  // Independent reads, issued together. Previously these ran one after another
+  // (≈ a dozen sequential database round trips per dashboard view). Settings,
+  // journal, backtests and enrollments are read ONCE and shared with the
+  // progress calculation instead of being fetched again inside it.
+  const sharedLearning = loadSharedLearningData(profile.id);
+  const enrollmentsRead = db.getEnrollments(profile.id);
+  const [{ t }, { settings, journal, backtests }, overall, enrollments, notifications, allCertificates, attempts] =
+    await Promise.all([
+      getTranslations(),
+      sharedLearning,
+      getOverallProgress(profile.id, { shared: sharedLearning, enrollments: enrollmentsRead }),
+      enrollmentsRead,
+      db.getNotifications(profile.id),
+      db.getCertificates(profile.id),
+      db.getAttempts(profile.id),
+    ]);
   const unread = notifications.filter((n) => n.read === false).length;
-  const certificates = (await db.getCertificates(profile.id)).filter((c) => !c.revoked);
-  const journalCount = (await db.getJournal(profile.id)).length;
-  const backtestCount = (await db.getBacktests(profile.id)).length;
-  const attempts = await db.getAttempts(profile.id);
+  const certificates = allCertificates.filter((c) => !c.revoked);
+  const journalCount = journal.length;
+  const backtestCount = backtests.length;
+
+  const accessNotice = query.access ? ACCESS_NOTICES[query.access] : undefined;
+  const accessNoticeCourse = /^[0-9a-f-]{36}$/i.test(query.course || '') ? query.course : undefined;
 
   // Next level threshold for the XP bar.
   const thresholds = [...settings.level_thresholds].sort((a, b) => a.xp - b.xp);
@@ -79,6 +133,12 @@ export default async function DashboardPage() {
     const elapsedDays = purchasedAtMs > 0 ? Math.min(totalLimitDays, Math.max(0, Math.floor((now - purchasedAtMs) / (24 * 60 * 60 * 1000)))) : 0;
     const daysPercent = Math.min(100, Math.max(0, Math.round(((totalLimitDays - remainingDays) / totalLimitDays) * 100)));
 
+    // Where "Darslarga o‘tish" leads. Telegram-delivered courses go through
+    // the access route (server-side ownership check, then a 303 to the buyer's
+    // own invite); the invite itself is never rendered into this page, and
+    // rendering never calls Telegram (courseAccessLink is pure).
+    const { delivery, href: accessHref, available: telegramReady } = courseAccessLink(course.id);
+
     return {
       course,
       status,
@@ -90,6 +150,9 @@ export default async function DashboardPage() {
       totalLimitDays,
       elapsedDays,
       daysPercent,
+      delivery,
+      telegramReady,
+      accessHref,
     };
   });
 
@@ -184,6 +247,39 @@ export default async function DashboardPage() {
         </header>
 
         {/* 30-Day Limit Hero Banner (Visible when user has courses) */}
+        {accessNotice && (
+          <section
+            role="status"
+            data-access-notice={query.access}
+            className={`mb-7 rounded-2xl border p-5 sm:p-6 ${
+              accessNotice.tone === 'error'
+                ? 'border-rose-500/30 bg-rose-950/20'
+                : 'border-amber-400/25 bg-amber-950/10'
+            }`}
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <AlertTriangle
+                  size={18}
+                  className={`mt-0.5 shrink-0 ${accessNotice.tone === 'error' ? 'text-rose-300' : 'text-amber-300'}`}
+                />
+                <div>
+                  <p className="text-sm font-black text-white">{accessNotice.title}</p>
+                  <p className="mt-1 text-xs leading-relaxed text-white/60">{accessNotice.body}</p>
+                </div>
+              </div>
+              {accessNotice.retry && accessNoticeCourse && (
+                <a
+                  href={`/api/course-access/${accessNoticeCourse}`}
+                  className="shrink-0 w-full sm:w-auto px-5 py-3 bg-white hover:bg-neutral-200 text-black font-black text-xs uppercase tracking-wider rounded-xl transition flex items-center justify-center gap-2 font-mono"
+                >
+                  <RefreshCw size={13} /> Qayta urinish
+                </a>
+              )}
+            </div>
+          </section>
+        )}
+
         {primaryCourseLimit && (
           <section className={`mb-7 rounded-3xl p-6 sm:p-7 border relative overflow-hidden transition-all ${
             primaryCourseLimit.isExpired 
@@ -263,17 +359,48 @@ export default async function DashboardPage() {
                     <RefreshCw size={14} />
                     <span>Qayta faollashtirish</span>
                   </Link>
+                ) : primaryCourseLimit.delivery === 'telegram' && !primaryCourseLimit.telegramReady ? (
+                  <span
+                    data-course-access="unavailable"
+                    className="w-full sm:w-auto px-6 py-3.5 bg-white/10 text-white/50 font-black text-xs uppercase tracking-wider rounded-xl border border-white/10 flex items-center justify-center gap-2 font-mono cursor-not-allowed"
+                    title="Telegram kanaliga kirish hali sozlanmagan"
+                  >
+                    <PlayCircle size={15} />
+                    <span>Darslarga o‘tish</span>
+                  </span>
                 ) : (
-                  <Link
-                    href={`/course/${primaryCourseLimit.course.id}`}
+                  // A plain top-level anchor (not next/link): the destination is a
+                  // server redirect to t.me, which the client router must not try
+                  // to fetch as an RSC payload. One click, one navigation.
+                  <a
+                    href={primaryCourseLimit.accessHref}
+                    data-course-access={primaryCourseLimit.delivery}
                     className="w-full sm:w-auto px-6 py-3.5 bg-white hover:bg-neutral-200 text-black font-black text-xs uppercase tracking-wider rounded-xl transition shadow-lg flex items-center justify-center gap-2 font-mono"
                   >
                     <PlayCircle size={15} />
                     <span>Darslarga o‘tish</span>
-                  </Link>
+                  </a>
                 )}
               </div>
             </div>
+
+            {/* Recovery for a saved invite Telegram no longer accepts (already
+                used on another account, revoked). Rate-limited server-side; the
+                old link is revoked and exactly one new one is issued. */}
+            {!primaryCourseLimit.isExpired &&
+              primaryCourseLimit.delivery === 'telegram' &&
+              primaryCourseLimit.telegramReady && (
+                <p className="mt-4 text-[11px] leading-relaxed text-white/40">
+                  Telegram havolasi ishlamayaptimi?{' '}
+                  <a
+                    href={`${primaryCourseLimit.accessHref}?retry=1`}
+                    data-course-access-retry
+                    className="font-bold text-white/70 underline underline-offset-2 hover:text-white"
+                  >
+                    Yangi havola olish
+                  </a>
+                </p>
+              )}
 
             {/* 30-day timeline bar */}
             <div className="mt-5 pt-4 border-t border-white/10">
@@ -408,8 +535,9 @@ export default async function DashboardPage() {
             ) : (
               <div className="space-y-4">
                 {courseLimits.map((item) => {
-                  const { course, status, remainingDays, isExpired } = item;
+                  const { course, status, remainingDays, isExpired, delivery, telegramReady, accessHref } = item;
                   const isPro = course.slug === 'pro' || course.title.toLowerCase().includes('pro');
+                  const viaTelegram = delivery === 'telegram';
 
                   return (
                     <article 
@@ -448,30 +576,40 @@ export default async function DashboardPage() {
                         </div>
 
                         <span className="shrink-0 font-mono text-sm font-bold text-white/70">
-                          {status.percentage}%
+                          {viaTelegram ? null : `${status.percentage}%`}
                         </span>
                       </div>
 
-                      {/* Course progress bar */}
-                      <div
-                        className="mb-3 h-2 w-full overflow-hidden rounded-full bg-white/10"
-                        role="progressbar"
-                        aria-valuenow={status.percentage}
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                      >
-                        <div 
-                          className={`h-full rounded-full transition-all ${
-                            status.completed ? 'bg-emerald-400' : 'bg-gradient-to-r from-pink-500 to-emerald-400'
-                          }`} 
-                          style={{ width: `${status.percentage}%` }} 
-                        />
-                      </div>
+                      {viaTelegram ? (
+                        // Content lives in the private Telegram channel, so a
+                        // web-lesson progress bar ("0 / 0 dars") would mislead.
+                        <p className="mb-5 text-[12px] text-white/50 leading-relaxed">
+                          Darslar yopiq Telegram kanalida. Kirish uchun tugmani bosing.
+                        </p>
+                      ) : (
+                        <>
+                          {/* Course progress bar */}
+                          <div
+                            className="mb-3 h-2 w-full overflow-hidden rounded-full bg-white/10"
+                            role="progressbar"
+                            aria-valuenow={status.percentage}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                          >
+                            <div
+                              className={`h-full rounded-full transition-all ${
+                                status.completed ? 'bg-emerald-400' : 'bg-gradient-to-r from-pink-500 to-emerald-400'
+                              }`}
+                              style={{ width: `${status.percentage}%` }}
+                            />
+                          </div>
 
-                      <p className="mb-5 text-[12px] text-white/50 font-mono">
-                        {status.completedLessons} / {status.totalLessons} {t('dashboard.lessonsDone')}
-                        {status.averageTestScore > 0 && ` · O‘rtacha test ${status.averageTestScore}%`}
-                      </p>
+                          <p className="mb-5 text-[12px] text-white/50 font-mono">
+                            {status.completedLessons} / {status.totalLessons} {t('dashboard.lessonsDone')}
+                            {status.averageTestScore > 0 && ` · O‘rtacha test ${status.averageTestScore}%`}
+                          </p>
+                        </>
+                      )}
 
                       {/* Action buttons */}
                       <div className="flex flex-wrap gap-2.5">
@@ -482,6 +620,24 @@ export default async function DashboardPage() {
                           >
                             <RefreshCw size={13} /> Qayta faollashtirish (30 kun)
                           </Link>
+                        ) : viaTelegram ? (
+                          telegramReady ? (
+                            // Same single access flow as the hero CTA above.
+                            <a
+                              href={accessHref}
+                              data-course-access="telegram"
+                              className="inline-flex items-center gap-2 rounded-xl bg-white px-5 py-3 text-[11px] font-black uppercase tracking-wider text-black transition hover:bg-neutral-200 font-mono shadow-md"
+                            >
+                              <PlayCircle size={14} /> Darslarga o‘tish
+                            </a>
+                          ) : (
+                            <span
+                              data-course-access="unavailable"
+                              className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-[11px] font-black uppercase tracking-wider text-white/45 font-mono"
+                            >
+                              <Clock size={13} /> Kanalga kirish tez orada
+                            </span>
+                          )
                         ) : status.nextLessonId ? (
                           <Link
                             href={`/lesson/${status.nextLessonId}`}
@@ -495,7 +651,7 @@ export default async function DashboardPage() {
                           </span>
                         ) : null}
 
-                        {!isExpired && (
+                        {!isExpired && !viaTelegram && (
                           <Link
                             href={`/course/${course.id}`}
                             className="inline-flex items-center rounded-xl border border-white/15 px-5 py-3 text-[11px] font-black uppercase tracking-wider text-white/70 transition hover:border-white/30 hover:text-white font-mono"

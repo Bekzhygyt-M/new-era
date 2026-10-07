@@ -1,6 +1,8 @@
 import { redirect } from 'next/navigation';
-import { NextResponse } from 'next/server';
-import { getSession, type SessionPayload } from '@/lib/auth/session';
+import { NextResponse, after } from 'next/server';
+import { cache } from 'react';
+import { cookies } from 'next/headers';
+import { getSession, SESSION_COOKIE, type SessionPayload } from '@/lib/auth/session';
 import { db } from '@/lib/db';
 import type { LocalProfile } from '@/lib/local-db';
 
@@ -18,8 +20,18 @@ export interface AuthContext {
   isAdmin: boolean;
 }
 
-/** Current user, or null when unauthenticated / the account no longer exists. */
-export async function getAuth(): Promise<AuthContext | null> {
+/**
+ * Resolves the profile behind one exact session cookie value.
+ *
+ * Memoised per request with React `cache()`, keyed by the raw cookie, so the
+ * layout, the page and getLocale() share ONE profile read instead of three or
+ * four sequential round trips. Keying by the cookie value means a session that
+ * changes mid-request (login/logout actions) can never be served stale.
+ * Outside a React render (route handlers, scripts) `cache` is a pass-through.
+ */
+// The argument is only the memoisation key; getSession() re-reads the cookie.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const authForCookie = cache(async (_rawCookie: string | undefined): Promise<AuthContext | null> => {
   const session = await getSession();
   if (!session) return null;
 
@@ -27,6 +39,17 @@ export async function getAuth(): Promise<AuthContext | null> {
   if (!profile) return null;
 
   return { session, profile, isAdmin: profile.role === 'admin' };
+});
+
+/** Current user, or null when unauthenticated / the account no longer exists. */
+export async function getAuth(): Promise<AuthContext | null> {
+  let raw: string | undefined;
+  try {
+    raw = (await cookies()).get(SESSION_COOKIE)?.value;
+  } catch {
+    raw = undefined;
+  }
+  return authForCookie(raw);
 }
 
 export async function getCurrentProfile(): Promise<LocalProfile | null> {
@@ -45,7 +68,14 @@ export async function requireUserPage(returnTo?: string): Promise<AuthContext> {
   if (!auth) {
     redirect(returnTo ? `/login?returnTo=${encodeURIComponent(returnTo)}` : '/login');
   }
-  await db.touchProfile(auth.profile.id);
+  // "Last active" is bookkeeping, not something the page needs: write it after
+  // the response is sent instead of holding every protected page on a DB write.
+  const profileId = auth.profile.id;
+  try {
+    after(() => db.touchProfile(profileId).catch(() => {}));
+  } catch {
+    void db.touchProfile(profileId).catch(() => {});
+  }
   return auth;
 }
 

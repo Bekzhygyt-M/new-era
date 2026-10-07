@@ -63,7 +63,7 @@ export async function POST(request: NextRequest) {
           title: 'Kurs ochildi 🎁',
           message: `Admin sizga "${course.title}" kursini ochib berdi.`,
           type: 'course_unlocked',
-          link: `/course/${course.id}`,
+          link: '/dashboard',
         });
 
         await db.logActivity(auth.profile.id, 'course_granted', { target: profile.id, course_id: course.id });

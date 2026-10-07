@@ -142,7 +142,7 @@ export async function POST(request: NextRequest) {
         title: 'Kurs faollashtirildi ✅',
         message: `Admin tomonidan "${course.title}" kursi 30 kunga faollashtirildi.`,
         type: 'payment_approved',
-        link: `/course/${course.id}`,
+        link: '/dashboard',
       });
     }
 

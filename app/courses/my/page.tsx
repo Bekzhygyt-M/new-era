@@ -16,7 +16,7 @@ import { db } from '@/lib/db';
 import { requireUserPage } from '@/lib/permissions';
 import { getTranslations } from '@/lib/i18n/server';
 import { localizeCourses } from '@/lib/content/localize';
-import { formatAmount, listBuyerOrders, type BuyerOrder } from '@/lib/payments/service';
+import { formatAmount, listBuyerOrders, courseAccessLink, type BuyerOrder } from '@/lib/payments/service';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,44 +30,52 @@ const ORDER_STATUS_UI: Record<BuyerOrder['status'], { tone: string; icon: typeof
   cancelled: { tone: 'text-white/40 border-white/10 bg-white/[0.03]', icon: XCircle },
 };
 
+/**
+ * Where a course card's "Darslarga o‘tish" leads: the same single access route
+ * the dashboard uses (Telegram courses → the buyer's private invite, web
+ * courses → their lesson page). A plain URL, never an invite.
+ */
+const courseAccessHref = (courseId: string) => courseAccessLink(courseId).href;
+
 export default async function MyCoursesPage() {
-  const { locale, t } = await getTranslations();
   // Verified session only — the cookie is signed and re-checked server-side.
   const { profile, isAdmin } = await requireUserPage('/courses/my');
   const isMasterAdmin = isAdmin;
 
+  // Independent reads, issued together instead of one after another.
+  const [{ locale, t }, courses, enrollments, orders] = await Promise.all([
+    getTranslations(),
+    db.getCourses(),
+    isMasterAdmin ? Promise.resolve([]) : db.getEnrollments(profile.id),
+    // The signed-in user's OWN orders only — scoped by their verified profile id.
+    listBuyerOrders(profile.id),
+  ]);
+  const courseById = new Map(courses.map((c) => [c.id, c]));
+
   // Admins can open every course; students see their active enrollments.
   const rawCourses = isMasterAdmin
-    ? (await db.getCourses()).map((course) => ({ id: `enr_${course.id}`, courses: course }))
-    : (
-        await Promise.all(
-          (await db.getEnrollments(profile.id))
-            .filter((e) => e.status === 'active')
-            .map(async (e) => ({ id: e.id, courses: await db.getCourse(e.course_id) }))
-        )
-      ).filter((item) => item.courses);
+    ? courses.map((course) => ({ id: `enr_${course.id}`, courses: course }))
+    : enrollments
+        .filter((e) => e.status === 'active')
+        .map((e) => ({ id: e.id, courses: courseById.get(e.course_id) || null }))
+        .filter((item) => item.courses);
 
   // Titles and descriptions come from the database, so they need the same
-  // translation pass the public catalogue gets.
-  const localized = await localizeCourses(
-    rawCourses.map((item) => item.courses!),
-    locale
-  );
-  const activeCourses = rawCourses.map((item, index) => ({ ...item, courses: localized[index] }));
+  // translation pass the public catalogue gets — one pass for cards and orders.
+  const orderCourseIds = new Set(orders.map((o) => o.courseId));
+  const toLocalize = [
+    ...rawCourses.map((item) => item.courses!),
+    ...courses.filter((c) => orderCourseIds.has(c.id) && !rawCourses.some((r) => r.courses!.id === c.id)),
+  ];
+  const localizedAll = await localizeCourses(toLocalize, locale);
+  const localizedById = new Map(localizedAll.map((c) => [c.id, c]));
+  const activeCourses = rawCourses.map((item) => ({ ...item, courses: localizedById.get(item.courses!.id)! }));
+  const orderTitles = new Map([...orderCourseIds].map((id) => [id, localizedById.get(id)?.title]));
 
-  // The signed-in user's OWN orders only — scoped by their verified profile id.
-  // This is how a buyer reaches /payment/<id> without ever seeing the id.
-  const orders = await listBuyerOrders(profile.id);
-  const orderTitles = new Map(
-    (
-      await localizeCourses(
-        (await Promise.all([...new Set(orders.map((o) => o.courseId))].map((id) => db.getCourse(id)))).filter(
-          (c): c is NonNullable<typeof c> => Boolean(c)
-        ),
-        locale
-      )
-    ).map((c) => [c.id, c.title])
-  );
+  // An approved order opens the course through the same access flow as the
+  // dashboard — not the payment page, and never a raw invite link.
+  const orderHref = (order: BuyerOrder) =>
+    order.status === 'approved' ? courseAccessHref(order.courseId) : order.href;
 
   return (
     <div className="min-h-screen bg-[#050505] text-white flex flex-col font-sans selection:bg-white selection:text-black">
@@ -141,13 +149,24 @@ export default async function MyCoursesPage() {
                     </div>
 
                     <div className="pt-4 border-t border-white/10 flex items-center justify-between gap-3">
-                      <Link
-                        href={`/dashboard`}
+                      {/* Same access flow as the dashboard CTA. Plain anchor:
+                          the server answers with a redirect (possibly to t.me),
+                          which next/link's client router must not intercept. */}
+                      <a
+                        href={
+                          // An admin has no purchase of their own, so a Telegram
+                          // course has no personal invite to open: send them to
+                          // the course in the admin panel instead of a denial.
+                          isMasterAdmin && courseAccessLink(c.id).delivery === 'telegram'
+                            ? `/admin/courses/${c.id}`
+                            : courseAccessHref(c.id)
+                        }
+                        data-course-access={courseAccessLink(c.id).delivery}
                         className="w-full py-3 bg-white hover:bg-neutral-200 text-black font-black text-xs uppercase tracking-wider rounded-xl transition shadow-xl flex items-center justify-center gap-2 font-mono"
                       >
                         <PlayCircle size={15} />
                         <span>{t('myCourses.goToLessons')}</span>
-                      </Link>
+                      </a>
                     </div>
                   </div>
                 );
@@ -201,17 +220,26 @@ export default async function MyCoursesPage() {
                         </p>
                       </div>
 
-                      <Link
-                        href={order.href}
-                        className={`shrink-0 w-full sm:w-auto px-5 py-3 text-xs font-black uppercase tracking-wider rounded-xl transition flex items-center justify-center gap-2 font-mono ${
-                          approved
-                            ? 'bg-white hover:bg-neutral-200 text-black shadow-xl'
-                            : 'bg-white/5 hover:bg-white hover:text-black text-white border border-white/15'
-                        }`}
-                      >
-                        {approved ? t('myCourses.openAccess') : t('myCourses.openOrder')}
-                        <ArrowRight size={14} />
-                      </Link>
+                      {approved ? (
+                        // Approved → open the course through the single access
+                        // flow (server-checked), exactly like the dashboard.
+                        <a
+                          href={orderHref(order)}
+                          data-course-access={courseAccessLink(order.courseId).delivery}
+                          className="shrink-0 w-full sm:w-auto px-5 py-3 text-xs font-black uppercase tracking-wider rounded-xl transition flex items-center justify-center gap-2 font-mono bg-white hover:bg-neutral-200 text-black shadow-xl"
+                        >
+                          {t('myCourses.goToLessons')}
+                          <ArrowRight size={14} />
+                        </a>
+                      ) : (
+                        <Link
+                          href={orderHref(order)}
+                          className="shrink-0 w-full sm:w-auto px-5 py-3 text-xs font-black uppercase tracking-wider rounded-xl transition flex items-center justify-center gap-2 font-mono bg-white/5 hover:bg-white hover:text-black text-white border border-white/15"
+                        >
+                          {t('myCourses.openOrder')}
+                          <ArrowRight size={14} />
+                        </Link>
+                      )}
                     </li>
                   );
                 })}

@@ -23,9 +23,10 @@ export default async function CheckoutPage({
   const course = await db.getCourse(courseId);
   if (!course || !course.published) notFound();
 
-  // Already owns it — no reason to pay twice.
+  // Already owns it — no reason to pay twice. Send them to their course via
+  // the dashboard, which is the single access point for every delivery type.
   if (await canAccessCourse(auth.profile, course.id) && await db.hasEnrollment(auth.profile.id, course.id)) {
-    redirect(`/course/${course.id}`);
+    redirect('/dashboard');
   }
 
   const settings = await db.getSettings();

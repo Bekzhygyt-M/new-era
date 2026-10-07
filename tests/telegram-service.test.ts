@@ -28,22 +28,29 @@ let svc: Svc;
 let db: Db;
 
 let mints: { chat_id: string; member_limit: number }[] = [];
+let revokes: { chat_id: string; invite_link: string }[] = [];
 let telegramMode: 'ok' | 'fail' = 'ok';
 
 const realFetch = globalThis.fetch;
-globalThis.fetch = (async (_input: unknown, init?: { body?: string }) => {
+globalThis.fetch = (async (input: unknown, init?: { body?: string }) => {
+  const method = String(input).split('/').pop();
   const body = JSON.parse(init?.body ?? '{}');
-  mints.push({ chat_id: body.chat_id, member_limit: body.member_limit });
   await new Promise((r) => setTimeout(r, 120)); // realistic latency to expose races
+  if (method === 'revokeChatInviteLink') {
+    revokes.push({ chat_id: body.chat_id, invite_link: body.invite_link });
+    return new Response('{"ok":true,"result":{}}', { status: 200 });
+  }
+  mints.push({ chat_id: body.chat_id, member_limit: body.member_limit });
   if (telegramMode === 'fail') return new Response('{"ok":false}', { status: 500 });
   return new Response(
-    JSON.stringify({ ok: true, result: { invite_link: `https://t.me/+stub${mints.length}` } }),
+    JSON.stringify({ ok: true, result: { invite_link: `https://t.me/+stubInvite${mints.length}` } }),
     { status: 200 }
   );
 }) as typeof fetch;
 
 function seed() {
   const now = new Date().toISOString();
+  const future = new Date(Date.now() + 20 * 86400e3).toISOString();
   const base = {
     user_id: 'u1', amount: 1, currency: 'UZS', provider: 'card', period: 'monthly', created_at: now,
     expires_at: new Date(Date.now() + 3600e3).toISOString(),
@@ -58,8 +65,27 @@ function seed() {
       // Approved BEFORE the Telegram feature existed: no invite stored.
       { ...base, id: 'p-std-legacy', order_id: 'T-3', course_id: STD, status: 'approved', approved_at: now },
       { ...base, id: 'p-pending', order_id: 'T-4', course_id: STD, status: 'pending' },
+      // u2: enrolled in BOTH products, approved before the Telegram feature
+      // existed (NULL invite) — the dashboard-button path must serve them.
+      { ...base, user_id: 'u2', id: 'q-std', order_id: 'T-5', course_id: STD, status: 'approved', approved_at: now },
+      { ...base, user_id: 'u2', id: 'q-pro', order_id: 'T-6', course_id: PRO, status: 'approved', approved_at: now },
+      // u3: a renewal — older approved payment already holds the invite.
+      { ...base, user_id: 'u3', id: 'r-old', order_id: 'T-7', course_id: STD, status: 'approved', approved_at: now,
+        created_at: new Date(Date.now() - 86400e3).toISOString(), telegram_invite_link: 'https://t.me/+renewalKept1' },
+      { ...base, user_id: 'u3', id: 'r-new', order_id: 'T-8', course_id: STD, status: 'approved', approved_at: now },
+      // u4: enrolled (e.g. admin grant) but no approved payment at all.
+      // u5: enrollment whose access window has ended.
+      { ...base, user_id: 'u5', id: 's-exp', order_id: 'T-9', course_id: STD, status: 'approved', approved_at: now },
     ],
-    enrollments: [], notifications: [], activity_logs: [],
+    enrollments: [
+      { id: 'e2s', user_id: 'u2', course_id: STD, status: 'active', purchased_at: now, expires_at: future, source: 'payment' },
+      { id: 'e2p', user_id: 'u2', course_id: PRO, status: 'active', purchased_at: now, expires_at: future, source: 'payment' },
+      { id: 'e3s', user_id: 'u3', course_id: STD, status: 'active', purchased_at: now, expires_at: future, source: 'payment' },
+      { id: 'e4s', user_id: 'u4', course_id: STD, status: 'active', purchased_at: now, expires_at: future, source: 'admin' },
+      { id: 'e5s', user_id: 'u5', course_id: STD, status: 'active', purchased_at: now,
+        expires_at: new Date(Date.now() - 3600e3).toISOString(), source: 'payment' },
+    ],
+    notifications: [], activity_logs: [],
   }));
 }
 
@@ -85,6 +111,7 @@ before(async () => {
 beforeEach(() => {
   seed();
   mints = [];
+  revokes = [];
   telegramMode = 'ok';
   configure(true);
 });
@@ -122,36 +149,37 @@ test('concurrent first loads (two tabs) create exactly one invite', async () => 
   assert.equal((await db.getPayment('p-std-legacy'))!.telegram_invite_link, a?.inviteUrl);
 });
 
-test('approval racing the status poll creates one invite; notification matches stored link', async () => {
-  const approval = svc.approvePayment('p-std-new', 'admin@test');
-  await new Promise((r) => setTimeout(r, 30));
-  const poll = await svc.ensureChannelInvite((await db.getPayment('p-std-new'))!);
-  const result = await approval;
-  assert.equal(result.ok, true);
-  assert.equal(mints.length, 1);
-  const stored = (await db.getPayment('p-std-new'))!.telegram_invite_link;
-  assert.equal(poll?.inviteUrl, stored);
-  const notes = await telegramNotes();
-  assert.equal(notes.length, 1);
-  assert.equal(notes[0].link, stored);
+test('approval creates NO invite and no Telegram notification (minted only on the buyer\'s click)', async () => {
+  const r = await svc.approvePayment('p-std-new', 'admin@test');
+  assert.equal(r.ok, true);
+  assert.equal(mints.length, 0, 'approval must not call Telegram');
+  assert.equal((await db.getPayment('p-std-new'))!.telegram_invite_link ?? null, null);
+  assert.equal((await telegramNotes()).length, 0);
+  const note = (await db.getNotifications('u1')).find((n: { type: string }) => n.type === 'payment_approved');
+  assert.equal(note?.link, '/dashboard', 'approval notification points at the dashboard CTA');
 });
 
-test('fresh Pro approval targets the Pro channel', async () => {
+test('fresh Pro approval, then the buyer\'s click, targets the Pro channel', async () => {
   const r = await svc.approvePayment('p-pro-new', 'admin@test');
   assert.equal(r.ok, true);
+  assert.equal(mints.length, 0);
+  const access = await svc.getCourseAccess('u1', PRO, { mint: true });
+  assert.equal(access.ok && access.delivery === 'telegram' && access.slug, 'pro');
   assert.equal(mints.length, 1);
   assert.equal(mints[0].chat_id, '-100pro');
-  const access = await svc.ensureChannelInvite((await db.getPayment('p-pro-new'))!);
-  assert.equal(access?.slug, 'pro');
+  const again = await svc.getCourseAccess('u1', PRO, { mint: true });
+  assert.equal(again.ok && again.href, access.ok && access.href);
   assert.equal(mints.length, 1, 'reload reuses the cached Pro invite');
 });
 
-test('re-approving an approved payment creates no second invite or notification', async () => {
+test('re-approving an approved payment creates no invite, notification or enrollment', async () => {
   await svc.approvePayment('p-std-new', 'admin@test');
   await svc.approvePayment('p-std-new', 'admin@test');
   await svc.approvePayment('p-std-new', 'admin@test');
-  assert.equal(mints.length, 1);
-  assert.equal((await telegramNotes()).length, 1);
+  assert.equal(mints.length, 0);
+  assert.equal((await telegramNotes()).length, 0);
+  const approvals = (await db.getNotifications('u1')).filter((n: { type: string }) => n.type === 'payment_approved');
+  assert.equal(approvals.length, 1);
   const enrollments = (await db.getEnrollments('u1')).filter((e: { course_id: string }) => e.course_id === STD);
   assert.equal(enrollments.length, 1);
 });
@@ -165,10 +193,16 @@ test('Telegram failure does not break approval; next load retries', async () => 
   assert.equal((await db.getPayment('p-std-new'))!.telegram_invite_link ?? null, null);
   assert.equal((await telegramNotes()).length, 0);
 
+  // The buyer's click while Telegram is down: a controlled, retryable denial.
+  const down = await svc.getCourseAccess('u1', STD, { mint: true });
+  assert.equal(!down.ok && down.reason, 'telegram_error');
+  assert.equal((await db.getPayment('p-std-new'))!.telegram_invite_link ?? null, null, 'nothing half-written');
+  assert.equal((await db.getPayment('p-std-new'))!.status, 'approved', 'payment untouched by the failure');
+
   telegramMode = 'ok';
-  const retry = await svc.ensureChannelInvite((await db.getPayment('p-std-new'))!);
-  assert.equal(retry?.slug, 'standard');
-  assert.equal((await db.getPayment('p-std-new'))!.telegram_invite_link, retry?.inviteUrl);
+  const retry = await svc.getCourseAccess('u1', STD, { mint: true });
+  assert.equal(retry.ok && retry.delivery === 'telegram' && retry.slug, 'standard');
+  assert.equal((await db.getPayment('p-std-new'))!.telegram_invite_link, retry.ok && retry.href);
 });
 
 test('missing configuration: approval still succeeds, no Telegram call, no access', async () => {
@@ -184,4 +218,98 @@ test('missing configuration: approval still succeeds, no Telegram call, no acces
 test('unapproved payment never yields access or a Telegram call', async () => {
   assert.equal(await svc.ensureChannelInvite((await db.getPayment('p-pending'))!), null);
   assert.equal(mints.length, 0);
+});
+
+// ─── Central access flow: getCourseAccess (dashboard "Darslarga o‘tish") ─────
+
+test('access: legacy approved buyer with NULL invite gets Standard → Standard, Pro → Pro', async () => {
+  const std = await svc.getCourseAccess('u2', STD, { mint: true });
+  const pro = await svc.getCourseAccess('u2', PRO, { mint: true });
+  assert.ok(std.ok && pro.ok);
+  assert.deepEqual(mints.map((m) => m.chat_id), ['-100std', '-100pro']);
+  assert.ok(mints.every((m) => m.member_limit === 1));
+  assert.equal(std.ok && std.href, (await db.getPayment('q-std'))!.telegram_invite_link);
+  assert.equal(pro.ok && pro.href, (await db.getPayment('q-pro'))!.telegram_invite_link);
+  assert.notEqual(std.ok && std.href, pro.ok && pro.href);
+});
+
+test('access: repeated and concurrent clicks are idempotent (one invite per payment)', async () => {
+  const burst = await Promise.all(Array.from({ length: 6 }, () => svc.getCourseAccess('u2', STD, { mint: true })));
+  assert.equal(mints.length, 1, 'concurrent first clicks share one mint');
+  assert.equal(new Set(burst.map((b) => b.ok && b.href)).size, 1);
+  for (let i = 0; i < 5; i++) await svc.getCourseAccess('u2', STD, { mint: true });
+  assert.equal(mints.length, 1, 'sequential re-clicks reuse the stored invite');
+});
+
+test('access: rendering (mint:false) and courseAccessLink never call Telegram or write', async () => {
+  const before = fs.readFileSync(path.join(DATA_DIR, 'data', 'db.json'), 'utf8');
+  const r = await svc.getCourseAccess('u2', STD);
+  assert.equal(r.ok && r.href, `/api/course-access/${STD}`);
+  assert.deepEqual(svc.courseAccessLink(STD), { delivery: 'telegram', href: `/api/course-access/${STD}`, available: true });
+  assert.deepEqual(svc.courseAccessLink(PRO), { delivery: 'telegram', href: `/api/course-access/${PRO}`, available: true });
+  assert.deepEqual(svc.courseAccessLink('33333333-3333-3333-3333-333333333333'),
+    { delivery: 'web', href: '/course/33333333-3333-3333-3333-333333333333', available: true });
+  assert.equal(mints.length, 0);
+  assert.equal(fs.readFileSync(path.join(DATA_DIR, 'data', 'db.json'), 'utf8'), before);
+});
+
+test('access: a user can never obtain another buyer\'s invite', async () => {
+  const owner = await svc.getCourseAccess('u2', PRO, { mint: true });
+  assert.ok(owner.ok);
+  mints = [];
+  // u1 owns no PRO enrollment; u4/u5 none either; unknown user nothing.
+  for (const uid of ['u1', 'u3', 'u4', 'nobody', '']) {
+    const r = await svc.getCourseAccess(uid, PRO, { mint: true });
+    assert.equal(r.ok, false, uid);
+    assert.equal(JSON.stringify(r).includes('t.me'), false, `${uid} must not see an invite`);
+  }
+  assert.equal(mints.length, 0);
+});
+
+test('access: denials are typed — no enrollment, expired, no approved payment', async () => {
+  const none = await svc.getCourseAccess('u1', STD, { mint: true });
+  assert.equal(!none.ok && none.reason, 'no_access');
+  const expired = await svc.getCourseAccess('u5', STD, { mint: true });
+  assert.equal(!expired.ok && expired.reason, 'expired');
+  const grant = await svc.getCourseAccess('u4', STD, { mint: true });
+  assert.equal(!grant.ok && grant.reason, 'no_payment');
+  assert.equal(mints.length, 0);
+});
+
+test('access: missing Telegram config is a controlled not_configured denial with zero calls', async () => {
+  configure(false);
+  const r = await svc.getCourseAccess('u2', STD, { mint: true });
+  assert.equal(!r.ok && r.reason, 'not_configured');
+  assert.equal(svc.courseAccessLink(STD).available, false);
+  assert.equal(mints.length, 0);
+});
+
+test('access: a renewal reuses the invite already held by an older approved payment', async () => {
+  const r = await svc.getCourseAccess('u3', STD, { mint: true });
+  assert.equal(r.ok && r.href, 'https://t.me/+renewalKept1');
+  assert.equal(mints.length, 0);
+});
+
+test('access: stale invite recovery (replace) revokes the old link and stores exactly one new one', async () => {
+  const first = await svc.getCourseAccess('u2', STD, { mint: true });
+  const [a, b] = await Promise.all([
+    svc.getCourseAccess('u2', STD, { mint: true, replace: true }),
+    svc.getCourseAccess('u2', STD, { mint: true, replace: true }),
+  ]);
+  assert.equal(mints.length, 2, 'one original + one replacement, even for a double click');
+  assert.equal(a.ok && a.href, b.ok && b.href);
+  assert.notEqual(a.ok && a.href, first.ok && first.href);
+  assert.equal(revokes.length, 1);
+  assert.equal(revokes[0].invite_link, first.ok && first.href);
+  assert.equal((await db.getPayment('q-std'))!.telegram_invite_link, a.ok && a.href);
+});
+
+test('access: a corrupted / non-invite stored value is never returned; it is replaced', async () => {
+  const raw = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'data', 'db.json'), 'utf8'));
+  raw.payments.find((p: { id: string }) => p.id === 'q-pro').telegram_invite_link = 'https://evil.example/+abcdefgh';
+  fs.writeFileSync(path.join(DATA_DIR, 'data', 'db.json'), JSON.stringify(raw));
+  const r = await svc.getCourseAccess('u2', PRO, { mint: true });
+  assert.ok(r.ok && /^https:\/\/t\.me\/\+stubInvite/.test(r.href));
+  assert.equal(mints.length, 1);
+  assert.equal(revokes.length, 0, 'an unsafe value is not sent to Telegram for revocation');
 });

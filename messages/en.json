@@ -812,10 +812,9 @@
     "adminAccess": "ADMIN ACCESS",
     "goToLessons": "Go to lessons",
     "ordersTitle": "My orders",
-    "ordersSubtitle": "Your payment status and course access. Tap the button to open an order.",
+    "ordersSubtitle": "Your payment status. To open a course, tap “Go to lessons”.",
     "orderNumber": "Order",
     "openOrder": "Open order",
-    "openAccess": "Access & Telegram",
     "status": {
       "pending": "Awaiting payment",
       "receipt_submitted": "Under review",

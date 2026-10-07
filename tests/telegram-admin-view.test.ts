@@ -42,7 +42,7 @@ const realFetch = globalThis.fetch;
 globalThis.fetch = (async () => {
   mints++;
   await new Promise((r) => setTimeout(r, 60));
-  return new Response(JSON.stringify({ ok: true, result: { invite_link: `https://t.me/+stub${mints}` } }), { status: 200 });
+  return new Response(JSON.stringify({ ok: true, result: { invite_link: `https://t.me/+stubInvite${mints}` } }), { status: 200 });
 }) as typeof fetch;
 
 function seed() {
@@ -63,19 +63,26 @@ function seed() {
       { ...base, id: 'p-legacy', order_id: 'A-1', user_id: 'buyer', status: 'approved', approved_at: now },
       { ...base, id: 'p-new', order_id: 'A-2', user_id: 'buyer', status: 'receipt_submitted' },
     ],
-    enrollments: [], notifications: [], activity_logs: [],
+    enrollments: [
+      { id: 'e-buyer', user_id: 'buyer', course_id: STD, status: 'active', purchased_at: now,
+        expires_at: new Date(Date.now() + 20 * 86400e3).toISOString(), source: 'payment' },
+    ],
+    notifications: [], activity_logs: [],
   }));
 }
 
 /**
- * Mirrors the status route's Telegram decision exactly: access is resolved
- * only when the viewer is the buyer. The wiring test below asserts the route
- * really contains this gate, so the two cannot silently drift apart.
+ * What a viewer gets from the single access flow (dashboard "Darslarga o‘tish"
+ * → /api/course-access/<courseId>). The route passes ONLY the session user's
+ * id into getCourseAccess, so an admin is evaluated as themselves: they have
+ * no enrollment of their own and therefore can never mint or receive the
+ * buyer's single-member invite. The wiring test pins the route to this.
  */
-async function statusTelegramFor(viewerId: string, paymentId: string) {
-  const payment = (await db.getPayment(paymentId))!;
-  const isBuyer = payment.user_id === viewerId;
-  return isBuyer ? svc.ensureChannelInvite(payment) : null;
+// The payment id is kept so call sites read like the old page view; access is per course.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function statusTelegramFor(viewerId: string, _paymentId: string) {
+  const r = await svc.getCourseAccess(viewerId, STD, { mint: true });
+  return r.ok && r.delivery === 'telegram' ? { slug: r.slug, inviteUrl: r.href } : null;
 }
 
 const stored = async (id: string) => (await db.getPayment(id))!.telegram_invite_link ?? null;
@@ -125,13 +132,14 @@ test('2c. admin viewing AFTER the buyer does not replace or consume the invite',
   assert.equal(await stored('p-legacy'), buyer?.inviteUrl, 'buyer\'s stored invite unchanged');
 });
 
-test('2d. admin APPROVING still issues the invite to the buyer (not to the admin)', async () => {
+test('2d. admin APPROVING creates no invite and no Telegram notification for anyone', async () => {
   const r = await svc.approvePayment('p-new', 'admin@test.local');
   assert.equal(r.ok, true);
-  assert.equal(mints, 1);
-  const notes = (await db.getNotifications('buyer')).filter((n: { type: string }) => n.type === 'telegram_access');
-  assert.equal(notes.length, 1, 'buyer is notified');
-  assert.equal((await db.getNotifications('admin')).filter((n: { type: string }) => n.type === 'telegram_access').length, 0);
+  assert.equal(mints, 0, 'the invite is created only by the buyer\'s own click');
+  for (const who of ['buyer', 'admin']) {
+    const notes = (await db.getNotifications(who)).filter((n: { type: string }) => n.type === 'telegram_access');
+    assert.equal(notes.length, 0, who);
+  }
 });
 
 // ─── 3. Admin cannot see the invite link ────────────────────────────────────
@@ -200,15 +208,13 @@ test('5b. concurrent buyer + admin loads still create exactly one invite', async
 
 // ─── Wiring: the real handlers apply the same rules ──────────────────────────
 
-test('wiring: status route gates Telegram on the buyer, after the ownership check', () => {
-  const src = read('app/api/payment/status/route.ts');
-  const guard = src.indexOf('payment.user_id !== auth.profile.id && !auth.isAdmin');
-  const isBuyer = src.indexOf('const isBuyer = payment.user_id === auth.profile.id;');
-  const call = src.indexOf('isBuyer ? await ensureChannelInvite(payment) : null');
-  assert.ok(guard > -1, 'ownership/admin guard preserved');
-  assert.ok(isBuyer > guard, 'buyer gate after the guard');
-  assert.ok(call > isBuyer, 'invite only resolved for the buyer');
-  assert.equal((src.match(/ensureChannelInvite\(/g) || []).length, 1, 'no other ungated call');
+test('wiring: the access route evaluates the session user only; the status route has no Telegram', () => {
+  const access = read('app/api/course-access/[courseId]/route.ts');
+  assert.match(access, /getCourseAccess\(auth\.profile\.id, courseId/);
+  assert.equal(/isAdmin/.test(access.replace(/\/\*[\s\S]*?\*\//g, '')), false, 'no admin bypass in code');
+  const status = read('app/api/payment/status/route.ts');
+  assert.equal(/ensureChannelInvite|getCourseAccess/.test(status), false);
+  assert.match(status, /payment\.user_id !== auth\.profile\.id && !auth\.isAdmin/, 'ownership/admin guard preserved');
 });
 
 test('wiring: every admin surface that returns payment rows strips the invite', () => {

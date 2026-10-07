@@ -154,3 +154,60 @@ export async function issueChannelInvite(payment: LocalPayment): Promise<Telegra
     return { ok: false, reason: 'api_error', message: 'Telegram bilan bog‘lanishda xatolik' };
   }
 }
+
+/**
+ * Revokes one previously issued invite for a product's channel.
+ *
+ * Used only by the explicit "my invite does not work" recovery path, so a
+ * replaced link can never be used afterwards. Best-effort: a failure (already
+ * revoked, already used, network) is reported as `false`, never thrown, and
+ * never blocks issuing the replacement. Never logs the link or the token.
+ */
+export async function revokeChannelInvite(slug: TelegramChannelSlug, inviteUrl: string): Promise<boolean> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const channelId = CHANNEL_BY_SLUG[slug];
+  if (!token || !channelId || !inviteUrl) return false;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/revokeChatInviteLink`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: channelId, invite_link: inviteUrl }),
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      console.error('[telegram] revokeChatInviteLink failed with HTTP', res.status, 'for', slug);
+      return false;
+    }
+    const data = (await res.json()) as { ok?: boolean };
+    return Boolean(data.ok);
+  } catch {
+    console.error('[telegram] revokeChatInviteLink threw for', slug);
+    return false;
+  }
+}
+
+/** True when this product's channel is configured (token + its channel id). */
+export function isChannelConfigured(slug: TelegramChannelSlug): boolean {
+  return Boolean(process.env.TELEGRAM_BOT_TOKEN && CHANNEL_BY_SLUG[slug]);
+}
+
+/**
+ * True for a URL that is safe to redirect a browser to as a Telegram invite:
+ * https, host t.me / telegram.me, and a private-invite path (`/+…` or
+ * `/joinchat/…`). Anything else — including a public `t.me/<username>` channel
+ * link — is rejected, so a corrupted stored value can never become an open
+ * redirect or a public-channel fallback.
+ */
+export function isSafeInviteUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 200) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'https:') return false;
+  if (url.hostname !== 't.me' && url.hostname !== 'telegram.me') return false;
+  if (url.username || url.password || url.port) return false;
+  return /^\/(\+[A-Za-z0-9_-]{6,}|joinchat\/[A-Za-z0-9_-]{6,})\/?$/.test(url.pathname);
+}

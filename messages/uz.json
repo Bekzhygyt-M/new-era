@@ -812,10 +812,9 @@
     "adminAccess": "ADMIN ACCESS",
     "goToLessons": "Darslarga o‘tish",
     "ordersTitle": "Buyurtmalarim",
-    "ordersSubtitle": "To‘lovlaringiz holati va kursga kirish. Buyurtmani ochish uchun tugmani bosing.",
+    "ordersSubtitle": "To‘lovlaringiz holati. Kursga kirish uchun “Darslarga o‘tish” tugmasini bosing.",
     "orderNumber": "Buyurtma",
     "openOrder": "Buyurtmani ochish",
-    "openAccess": "Kirish va Telegram",
     "status": {
       "pending": "To‘lov kutilmoqda",
       "receipt_submitted": "Tekshirilmoqda",

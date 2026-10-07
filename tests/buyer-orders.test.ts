@@ -39,7 +39,7 @@ const realFetch = globalThis.fetch;
 globalThis.fetch = (async (_i: unknown, init?: { body?: string }) => {
   mints.push(JSON.parse(init?.body ?? '{}').chat_id);
   await new Promise((r) => setTimeout(r, 40));
-  return new Response(JSON.stringify({ ok: true, result: { invite_link: `https://t.me/+stub${mints.length}` } }), { status: 200 });
+  return new Response(JSON.stringify({ ok: true, result: { invite_link: `https://t.me/+stubInvite${mints.length}` } }), { status: 200 });
 }) as typeof fetch;
 
 const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
@@ -66,7 +66,10 @@ function seed() {
       { ...base, id: 'o-approved', order_id: 'NE-9', user_id: 'other', course_id: STD, status: 'approved', approved_at: iso(1e5), created_at: iso(2e5),
         telegram_invite_link: 'https://t.me/+OTHER_USERS_INVITE' },
     ],
-    enrollments: [], notifications: [], activity_logs: [],
+    enrollments: [
+      { id: 'e-legacy', user_id: 'buyer', course_id: STD, status: 'active', purchased_at: iso(5e6), expires_at: iso(-20 * 86400e3), source: 'payment' },
+    ],
+    notifications: [], activity_logs: [],
   }));
 }
 
@@ -177,39 +180,43 @@ test('every status the list can produce has a label in all three locales', () =>
   for (const locale of ['uz', 'ru', 'en']) {
     const m = JSON.parse(read(`messages/${locale}.json`)).myCourses;
     for (const s of statuses) assert.ok(m.status?.[s], `${locale}: myCourses.status.${s}`);
-    for (const k of ['ordersTitle', 'ordersSubtitle', 'orderNumber', 'openOrder', 'openAccess']) {
+    for (const k of ['ordersTitle', 'ordersSubtitle', 'orderNumber', 'openOrder', 'goToLessons']) {
       assert.ok(m[k], `${locale}: myCourses.${k}`);
     }
   }
 });
 
-// ─── Approved → Telegram access flow, unchanged ─────────────────────────────
+// ─── Approved → the same single access flow as the dashboard ────────────────
 
-test('approved order links to the page where its buyer gets Telegram access', async () => {
+test('approved order opens the course via the access route, which issues the buyer\'s invite', async () => {
   const o = (await svc.listBuyerOrders('buyer')).find((x) => x.id === 'b-legacy')!;
   assert.equal(o.status, 'approved');
-  assert.equal(o.href, '/payment/b-legacy');
-  // Opening that page as the buyer runs the existing Telegram path.
-  const access = await svc.ensureChannelInvite((await db.getPayment('b-legacy'))!);
-  assert.equal(access?.slug, 'standard');
+  assert.equal(o.href, '/payment/b-legacy', 'the order itself still links to its payment page');
+  assert.equal(svc.courseAccessLink(o.courseId).href, `/api/course-access/${STD}`);
+  // What the access route does for this buyer on click.
+  const access = await svc.getCourseAccess('buyer', o.courseId, { mint: true });
+  assert.equal(access.ok && access.delivery === 'telegram' && access.slug, 'standard');
   assert.deepEqual(mints, ['-100std']);
-  assert.equal(await stored('b-legacy'), access?.inviteUrl);
+  assert.equal(await stored('b-legacy'), access.ok && access.href);
 });
 
 test('existing approved payment: repeat visits from the list stay idempotent', async () => {
-  const first = await svc.ensureChannelInvite((await db.getPayment('b-legacy'))!);
+  const first = await svc.getCourseAccess('buyer', STD, { mint: true });
   for (let i = 0; i < 4; i++) {
     await svc.listBuyerOrders('buyer');
-    const again = await svc.ensureChannelInvite((await db.getPayment('b-legacy'))!);
-    assert.equal(again?.inviteUrl, first?.inviteUrl);
+    const again = await svc.getCourseAccess('buyer', STD, { mint: true });
+    assert.equal(again.ok && again.href, first.ok && first.href);
   }
   assert.equal(mints.length, 1);
 });
 
-test('a Pro order, once approved, reaches the Pro channel', async () => {
+test('a Pro order, once approved, reaches the Pro channel on the buyer\'s click', async () => {
   const r = await svc.approvePayment('b-pro', 'admin@test.local');
   assert.equal(r.ok, true);
   assert.equal((await svc.listBuyerOrders('buyer')).find((o) => o.id === 'b-pro')!.status, 'approved');
+  assert.deepEqual(mints, [], 'approval itself mints nothing');
+  const access = await svc.getCourseAccess('buyer', PRO, { mint: true });
+  assert.equal(access.ok && access.delivery === 'telegram' && access.slug, 'pro');
   assert.deepEqual(mints, ['-100pro']);
 });
 
@@ -226,27 +233,26 @@ test('Kurslarim page lists orders for the signed-in profile only', () => {
   const page = read('app/courses/my/page.tsx');
   assert.match(page, /requireUserPage\('\/courses\/my'\)/);
   assert.match(page, /listBuyerOrders\(profile\.id\)/, 'scoped to the verified session profile');
-  assert.match(page, /href=\{order\.href\}/, 'each order is a normal link');
+  assert.match(page, /href=\{orderHref\(order\)\}/, 'each order is a normal link');
+  assert.match(page, /order\.status === 'approved' \? courseAccessHref\(order\.courseId\) : order\.href/,
+    'approved orders open the course via the access flow; others open their payment page');
   assert.equal(/getPayments\(\)/.test(page), false, 'never lists all payments');
-  assert.equal(/ensureChannelInvite|telegram_invite_link|inviteUrl/.test(page), false,
-    'the list never mints or renders an invite; that stays on the payment page');
+  assert.equal(/ensureChannelInvite|getCourseAccess|telegram_invite_link|inviteUrl/.test(page), false,
+    'the list never mints or renders an invite');
 });
 
 test('the Kurslarim navigation entry still points at /courses/my', () => {
   assert.match(read('components/navbar/Navbar.tsx'), /href="\/courses\/my"/);
 });
 
-test('admin behaviour unchanged: status route still gates Telegram on the buyer', () => {
-  const route = read('app/api/payment/status/route.ts');
-  assert.match(route, /const isBuyer = payment\.user_id === auth\.profile\.id;/);
-  assert.match(route, /isBuyer \? await ensureChannelInvite\(payment\) : null/);
+test('admin behaviour: status route has no Telegram; access route evaluates the session user', () => {
+  assert.equal(/ensureChannelInvite|getCourseAccess/.test(read('app/api/payment/status/route.ts')), false);
+  assert.match(read('app/api/course-access/[courseId]/route.ts'), /getCourseAccess\(auth\.profile\.id, courseId/);
 });
 
-test('admin viewing an approved buyer payment still creates nothing', async () => {
-  const p = (await db.getPayment('b-legacy'))!;
-  const isBuyer = p.user_id === 'admin';
-  const access = isBuyer ? await svc.ensureChannelInvite(p) : null;
-  assert.equal(access, null);
+test('admin opening the buyer\'s course access creates nothing', async () => {
+  const access = await svc.getCourseAccess('admin', STD, { mint: true });
+  assert.equal(access.ok, false);
   assert.equal(mints.length, 0);
   assert.equal(await stored('b-legacy'), null);
 });

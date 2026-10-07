@@ -50,6 +50,27 @@ export interface CourseStatus {
   nextLessonId: string | null;
 }
 
+/** Per-user rows every course status needs; independent of the course. */
+export interface SharedLearningData {
+  settings: Awaited<ReturnType<typeof db.getSettings>>;
+  progressRows: Awaited<ReturnType<typeof db.getProgress>>;
+  backtests: Awaited<ReturnType<typeof db.getBacktests>>;
+  journal: Awaited<ReturnType<typeof db.getJournal>>;
+  tests: Awaited<ReturnType<typeof db.getTests>>;
+}
+
+/** Loads the course-independent rows once, in parallel. */
+export async function loadSharedLearningData(userId: string): Promise<SharedLearningData> {
+  const [settings, progressRows, backtests, journal, tests] = await Promise.all([
+    db.getSettings(),
+    db.getProgress(userId),
+    db.getBacktests(userId),
+    db.getJournal(userId),
+    db.getTests(),
+  ]);
+  return { settings, progressRows, backtests, journal, tests };
+}
+
 /**
  * Result buckets from TZ §7.5:
  *   0–69   → rewatch the lesson
@@ -70,18 +91,19 @@ export function scoreOutcome(score: number, passingScore: number): {
 }
 
 /** Full per-lesson status for one course, applying sequential unlocking. */
-export async function getCourseStatus(userId: string, courseId: string): Promise<CourseStatus> {
+export async function getCourseStatus(
+  userId: string,
+  courseId: string,
+  shared?: Promise<SharedLearningData>
+): Promise<CourseStatus> {
   // Everything is fetched up front and in parallel. Reading per module or per
   // lesson inside the loops below turns one page into dozens of round trips
-  // once the store is a real database.
-  const [settings, modules, progressRows, backtests, journal, courseLessons, tests] = await Promise.all([
-    db.getSettings(),
+  // once the store is a real database. Course-independent rows (settings,
+  // progress, backtests, journal, tests) can be shared across courses.
+  const [{ settings, progressRows, backtests, journal, tests }, modules, courseLessons] = await Promise.all([
+    shared ?? loadSharedLearningData(userId),
     db.getModules(courseId),
-    db.getProgress(userId),
-    db.getBacktests(userId),
-    db.getJournal(userId),
     db.getCourseLessons(courseId),
-    db.getTests(),
   ]);
 
   const progressByLesson = new Map(progressRows.map((p) => [p.lesson_id, p]));
@@ -388,13 +410,30 @@ export async function issueCertificateIfEligible(userId: string, courseId: strin
 }
 
 /** Aggregate progress across every course the user is enrolled in. */
-export async function getOverallProgress(userId: string) {
-  const enrollments = await db.getEnrollments(userId);
-  const courses = (
-    await Promise.all(enrollments.map((e) => db.getCourse(e.course_id)))
-  ).filter((c): c is NonNullable<typeof c> => Boolean(c));
+export async function getOverallProgress(
+  userId: string,
+  preloaded: {
+    shared?: Promise<SharedLearningData>;
+    enrollments?: ReturnType<typeof db.getEnrollments>;
+  } = {}
+) {
+  // Enrollments and the course-independent learning rows don't depend on each
+  // other, so they load together; each course then only adds its own modules
+  // and lessons. Previously every course re-fetched settings, progress,
+  // backtests, journal and tests, and getCourse ran as a separate wave.
+  // A page that needs the same rows itself (the dashboard) passes its own
+  // in-flight reads so nothing is fetched twice.
+  const shared = preloaded.shared ?? loadSharedLearningData(userId);
+  const [enrollments, allCourses] = await Promise.all([
+    preloaded.enrollments ?? db.getEnrollments(userId),
+    db.getCourses(),
+  ]);
+  const courseById = new Map(allCourses.map((c) => [c.id, c]));
+  const courses = enrollments
+    .map((e) => courseById.get(e.course_id))
+    .filter((c): c is NonNullable<typeof c> => Boolean(c));
 
-  const statuses = await Promise.all(courses.map((c) => getCourseStatus(userId, c.id)));
+  const statuses = await Promise.all(courses.map((c) => getCourseStatus(userId, c.id, shared)));
   const totalLessons = statuses.reduce((s, x) => s + x.totalLessons, 0);
   const completedLessons = statuses.reduce((s, x) => s + x.completedLessons, 0);
   const scored = statuses.filter((s) => s.averageTestScore > 0);

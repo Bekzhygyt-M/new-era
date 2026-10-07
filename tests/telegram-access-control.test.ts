@@ -1,10 +1,13 @@
 /**
- * Access-control and idempotency checks for the payment status endpoint that
- * delivers Telegram access.
+ * Access-control and wiring checks for Telegram course access.
  *
- * Fully static + isolated: reads the route source and asserts the ownership
- * gate precedes the invite resolution. No HTTP server, no database, no Telegram
- * calls.
+ * Course access is opened ONLY through GET /api/course-access/<courseId>
+ * (the dashboard's "Darslarga o‘tish"). The payment status endpoint and page
+ * deal with payment state only and never mint, read out or render an invite.
+ *
+ * Fully static: reads the sources and asserts guard ordering. No HTTP server,
+ * no database, no Telegram calls. Behaviour is covered by
+ * tests/telegram-service.test.ts and the isolated browser E2E harness.
  *
  * Run:  npx tsx --test tests/telegram-access-control.test.ts
  */
@@ -13,29 +16,61 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 const route = fs.readFileSync('app/api/payment/status/route.ts', 'utf8');
+const access = fs.readFileSync('app/api/course-access/[courseId]/route.ts', 'utf8');
 const service = fs.readFileSync('lib/payments/service.ts', 'utf8');
 const client = fs.readFileSync('app/payment/[paymentId]/PaymentStatusClient.tsx', 'utf8');
 
-test('status route is authenticated', () => {
+test('status route is authenticated and owner-or-admin only', () => {
   assert.match(route, /requireUserApi\(\)/, 'must require a signed-in user');
-});
-
-test('ownership check happens BEFORE channel invite is resolved', () => {
-  const guard = route.indexOf('payment.user_id !== auth.profile.id');
-  const invite = route.indexOf('ensureChannelInvite(payment)');
-  assert.ok(guard > -1, 'ownership guard must exist');
-  assert.ok(invite > -1, 'invite must be resolved');
-  assert.ok(guard < invite, 'ownership must be checked before minting/returning an invite');
-});
-
-test('a non-owner is rejected with 403', () => {
   assert.match(route, /Ruxsat berilmagan'\s*,\s*403/);
 });
 
-test('expired payments are marked expired before invite resolution', () => {
-  const exp = route.indexOf('isExpired(payment)');
-  const invite = route.indexOf('ensureChannelInvite(payment)');
-  assert.ok(exp > -1 && exp < invite, 'expiry check must precede invite resolution');
+test('status route never touches Telegram', () => {
+  assert.equal(/ensureChannelInvite|getCourseAccess|telegram_invite_link|issueChannelInvite/.test(route), false);
+  assert.equal(/telegram\s*:/.test(route), false, 'no telegram field in the JSON response');
+});
+
+test('access route: session first, then id validation, then the central decision', () => {
+  const auth = access.indexOf('await getAuth()');
+  const unauth = access.indexOf('if (!auth) return to(request, `/login');
+  const uuid = access.indexOf('if (!UUID.test(courseId))');
+  const decide = access.indexOf('getCourseAccess(auth.profile.id, courseId');
+  assert.ok(auth > -1 && unauth > auth && uuid > unauth && decide > uuid);
+  assert.equal((access.match(/getCourseAccess\(/g) || []).length, 1, 'exactly one access decision');
+  assert.equal(/ensureChannelInvite|issueChannelInvite/.test(access), false, 'no Telegram logic in the route');
+});
+
+test('access route identifies the user only from the verified session', () => {
+  assert.equal(/searchParams\.get\('(userId|user|paymentId)'\)/.test(access), false);
+  assert.match(access, /getCourseAccess\(auth\.profile\.id,/);
+});
+
+test('access route only ever redirects to a safe private invite, never caches it', () => {
+  const guard = access.indexOf('if (!isSafeInviteUrl(decision.href))');
+  const redirect = access.lastIndexOf('NextResponse.redirect(decision.href');
+  assert.ok(guard > -1 && redirect > guard);
+  assert.match(access, /'Cache-Control': 'private, no-store, max-age=0'/);
+  assert.match(access, /'Referrer-Policy': 'no-referrer'/);
+});
+
+test('stale-link replacement is rate-limited per user and course', () => {
+  assert.match(access, /rateLimit\(`course-access:replace:\$\{auth\.profile\.id\}:\$\{courseId\}`, 3,/);
+});
+
+test('getCourseAccess checks the enrollment before any invite work', () => {
+  const fn = service.slice(service.indexOf('export async function getCourseAccess'));
+  const enrol = fn.indexOf('db.hasEnrollment(userId, courseId)');
+  const deny = fn.indexOf("return deny(enrollment ? 'expired' : 'no_access')");
+  const mint = fn.indexOf('ensureChannelInvite(payment');
+  assert.ok(enrol > -1 && deny > enrol && mint > deny);
+  assert.match(fn, /p\.user_id === userId && p\.course_id === courseId && p\.status === 'approved'/);
+});
+
+test('getCourseAccess only mints when explicitly asked (mint: true)', () => {
+  const fn = service.slice(service.indexOf('export async function getCourseAccess'));
+  const gate = fn.indexOf('if (!options.mint)');
+  const mint = fn.indexOf('ensureChannelInvite(payment');
+  assert.ok(gate > -1 && gate < mint);
 });
 
 test('ensureChannelInvite refuses anything not approved', () => {
@@ -48,9 +83,9 @@ test('ensureChannelInvite refuses when Telegram is unconfigured', () => {
   assert.match(fn, /if \(!isTelegramConfigured\(\)\) return null;/);
 });
 
-test('ensureChannelInvite reuses a cached link instead of minting again', () => {
+test('ensureChannelInvite reuses a safe cached link before minting', () => {
   const fn = service.slice(service.indexOf('export async function ensureChannelInvite'));
-  const cached = fn.indexOf('if (payment.telegram_invite_link)');
+  const cached = fn.indexOf('isSafeInviteUrl(payment.telegram_invite_link)');
   const mint = fn.indexOf('issueChannelInvite(payment)');
   assert.ok(cached > -1 && cached < mint, 'cached link must short-circuit before a new mint');
 });
@@ -60,24 +95,12 @@ test('issueChannelInvite also refuses unapproved payments (defence in depth)', (
   assert.match(tg, /if \(payment\.status !== 'approved'\)/);
 });
 
-test('approval hook is inside the fresh-transition guard only', () => {
-  const fresh = service.indexOf('if (!result.was_already_approved && existing.status !== \'approved\')');
-  const invite = service.indexOf('ensureChannelInvite(result.payment)');
-  const endOfBlock = service.indexOf('return { ok: true, payment: result.payment };');
-  assert.ok(fresh > -1, 'fresh-transition guard must exist');
-  assert.ok(invite > fresh, 'invite must be issued after the guard');
-  assert.ok(invite < endOfBlock, 'invite must be inside the guarded block');
-});
-
-test('Telegram failure cannot fail the payment approval', () => {
-  // Access is only acted on when present; no throw path escapes. The runtime
-  // behaviour is exercised in tests/telegram-service.test.ts.
-  const start = service.indexOf('const access = await ensureChannelInvite(result.payment)');
-  const end = service.indexOf('return { ok: true, payment: result.payment };');
-  assert.ok(start > -1 && end > start);
-  const block = service.slice(start, end);
-  assert.match(block, /if \(access\)/);
-  assert.equal(/throw new Error/.test(block), false, 'must not throw on Telegram failure');
+test('approval makes no Telegram call; it stays inside the fresh-transition guard', () => {
+  const fn = service.slice(service.indexOf('export async function approvePayment'), service.indexOf('async function persistInvite'));
+  assert.match(fn, /if \(!result\.was_already_approved && existing\.status !== 'approved'\)/);
+  assert.equal(/ensureChannelInvite|issueChannelInvite|getCourseAccess/.test(fn), false,
+    'approval must never mint: a one-seat invite is created only by the buyer\'s click');
+  assert.match(fn, /link: '\/dashboard'/);
 });
 
 test('invite is persisted best-effort and never breaks approval', () => {
@@ -86,20 +109,20 @@ test('invite is persisted best-effort and never breaks approval', () => {
   assert.match(fn, /catch/);
 });
 
-test('UI shows the channel only when approved AND a link exists', () => {
-  assert.match(client, /status === 'approved' && telegram/);
+test('payment page requests no invite and renders no Telegram CTA', () => {
+  assert.equal(/telegram|inviteUrl|t\.me/i.test(client.replace(/\/\*[\s\S]*?\*\//g, '')), false);
+  assert.equal(/\/course\/\$\{/.test(client), false, 'no indirect hop through /course/<id>');
+  assert.match(client, /href="\/dashboard"/);
+});
+
+test('payment page polls only while the order can still change', () => {
+  assert.match(client, /new Set<Status>\(\['pending', 'receipt_submitted'\]\)/);
+  assert.match(client, /if \(!LIVE\.has\(status\)\) return;/);
+  assert.match(client, /data\.status === 'approved' && previous !== 'approved'/);
 });
 
 test('UI never renders a fallback or hardcoded t.me link', () => {
-  assert.equal(/href=["']https:\/\/t\.me\//.test(client), false, 'no hardcoded public link');
-});
-
-test('UI labels differ per product', () => {
-  assert.match(client, /Pro Trading kanaliga qo‘shilish/);
-  assert.match(client, /Standard Trading kanaliga qo‘shilish/);
-});
-
-test('UI opens the invite safely', () => {
-  assert.match(client, /rel="noopener noreferrer"/);
-  assert.match(client, /target="_blank"/);
+  for (const f of ['app/dashboard/page.tsx', 'app/courses/my/page.tsx', 'app/payment/[paymentId]/PaymentStatusClient.tsx']) {
+    assert.equal(/https:\/\/t\.me\//.test(fs.readFileSync(f, 'utf8')), false, f);
+  }
 });

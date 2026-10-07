@@ -3,21 +3,18 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Clock, CheckCircle2, XCircle, Loader2, AlertTriangle, Hourglass, Send } from 'lucide-react';
+import { Clock, CheckCircle2, XCircle, Loader2, AlertTriangle, Hourglass } from 'lucide-react';
 
 /**
  * Order status with live polling (TZ §19).
  * The status and the remaining time both come from the server.
+ *
+ * This page is about the PAYMENT only. Course access (including the private
+ * Telegram channel) is opened from the dashboard's "Darslarga o‘tish" button,
+ * so no invite link is ever requested or rendered here.
  */
 
 type Status = 'pending' | 'receipt_submitted' | 'approved' | 'rejected' | 'expired' | 'cancelled';
-
-/** Telegram channel access, resolved server-side. Null when unavailable. */
-type TelegramAccess = {
-  slug: 'standard' | 'pro';
-  channelName: string;
-  inviteUrl: string;
-};
 
 interface Props {
   paymentId: string;
@@ -41,13 +38,14 @@ const STATUS_META: Record<Status, { label: string; tone: string; icon: typeof Cl
   cancelled: { label: 'Bekor qilindi', tone: 'text-white/40', icon: XCircle },
 };
 
+/** States that can still change; everything else is final, so polling stops. */
+const LIVE: ReadonlySet<Status> = new Set<Status>(['pending', 'receipt_submitted']);
+
 export default function PaymentStatusClient(props: Props) {
   const router = useRouter();
   const [status, setStatus] = useState<Status>(props.initialStatus);
   const [remaining, setRemaining] = useState(props.initialRemaining);
   const [reason, setReason] = useState(props.rejectionReason);
-  const [enrolled, setEnrolled] = useState(props.initialStatus === 'approved');
-  const [telegram, setTelegram] = useState<TelegramAccess | null>(null);
 
   const poll = useCallback(async () => {
     try {
@@ -55,30 +53,26 @@ export default function PaymentStatusClient(props: Props) {
       if (!res.ok) return;
 
       const data = await res.json();
-      setStatus(data.status);
       setRemaining(data.remainingSeconds);
       setReason(data.rejectionReason);
-      setEnrolled(Boolean(data.enrolled));
-      setTelegram(data.telegram ?? null);
-
-      if (data.status === 'approved') router.refresh();
+      setStatus((previous) => {
+        // Refresh server components only on the transition INTO approved —
+        // never on every poll, which previously re-rendered the page in a loop.
+        if (data.status === 'approved' && previous !== 'approved') router.refresh();
+        return data.status;
+      });
     } catch {
       // Transient failure — the next poll picks it up.
     }
   }, [props.paymentId, router]);
 
-  // Poll while the order can still change; stop once it is settled.
+  // Poll only while the order can still change; stop once it is settled.
   useEffect(() => {
-    if (status === 'approved' || status === 'cancelled') return;
+    if (!LIVE.has(status)) return;
 
     const timer = setInterval(poll, 8000);
     return () => clearInterval(timer);
   }, [poll, status]);
-
-  // Polling stops on approval, so fetch once more to pick up channel access.
-  useEffect(() => {
-    if (status === 'approved') void poll();
-  }, [status, poll]);
 
   useEffect(() => {
     if (status !== 'pending' || remaining <= 0) return;
@@ -144,38 +138,20 @@ export default function PaymentStatusClient(props: Props) {
         </div>
       )}
 
-      {/* Telegram channel access — only ever shown for an approved payment,
-          and only the link the server issued for this user's own order. */}
-      {status === 'approved' && telegram && (
-        <section className="rounded-2xl border border-sky-400/25 bg-sky-400/[0.06] p-5">
-          <p className="mb-3 text-[11px] font-black uppercase tracking-wider text-sky-300">
-            Yopiq Telegram kanal
-          </p>
-          <a
-            href={telegram.inviteUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex w-full items-center justify-center gap-2 rounded-xl bg-sky-400 py-3.5 text-[11px] font-black uppercase tracking-wider text-black transition hover:bg-sky-300"
-          >
-            <Send size={15} />
-            {telegram.slug === 'pro'
-              ? 'Pro Trading kanaliga qo‘shilish'
-              : 'Standard Trading kanaliga qo‘shilish'}
-          </a>
-          <p className="mt-3 text-[12px] leading-relaxed text-white/50">
-            Bu havola faqat sizga mo‘ljallangan. Uni boshqa kishaga yubormang.
-            Kanalga qo‘shilganingizdan keyin alohida xabar berilmaydi.
-          </p>
-        </section>
+      {status === 'approved' && (
+        <p className="flex items-start gap-2.5 rounded-2xl border border-emerald-400/25 bg-emerald-400/[0.06] p-4 text-[12.5px] leading-relaxed text-emerald-100/80">
+          <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-emerald-300" />
+          To‘lov tasdiqlandi. Kursga Kabinetdagi “Darslarga o‘tish” tugmasi orqali kiring.
+        </p>
       )}
 
       <div className="flex flex-col gap-2.5 sm:flex-row">
-        {status === 'approved' && enrolled ? (
+        {status === 'approved' ? (
           <Link
-            href={`/course/${props.courseId}`}
+            href="/dashboard"
             className="flex-1 rounded-xl bg-white py-3.5 text-center text-[11px] font-black uppercase tracking-wider text-black transition hover:bg-white/90"
           >
-            Kursni boshlash
+            Kabinetga o‘tish
           </Link>
         ) : status === 'rejected' || status === 'expired' || status === 'cancelled' ? (
           <Link
@@ -186,12 +162,14 @@ export default function PaymentStatusClient(props: Props) {
           </Link>
         ) : null}
 
-        <Link
-          href="/dashboard"
-          className="rounded-xl border border-white/12 px-6 py-3.5 text-center text-[11px] font-black uppercase tracking-wider text-white/70 transition hover:border-white/30 hover:text-white"
-        >
-          Kabinet
-        </Link>
+        {status !== 'approved' && (
+          <Link
+            href="/dashboard"
+            className="rounded-xl border border-white/12 px-6 py-3.5 text-center text-[11px] font-black uppercase tracking-wider text-white/70 transition hover:border-white/30 hover:text-white"
+          >
+            Kabinet
+          </Link>
+        )}
       </div>
     </div>
   );

@@ -6,12 +6,22 @@ import Footer from '@/components/footer/Footer';
 import { requireUserPage, canAccessCourse } from '@/lib/permissions';
 import { db } from '@/lib/db';
 import { getCourseStatus, certificateEligibility } from '@/lib/learning';
+import { courseDelivery } from '@/lib/payments/service';
 
 export const dynamic = 'force-dynamic';
 
 /** Course hub: modules, sequential lesson unlocking and progress (TZ §15). */
 export default async function CoursePage({ params }: { params: Promise<{ courseId: string }> }) {
   const { courseId } = await params;
+
+  // Telegram-delivered courses have no web lessons: their content is the
+  // private channel. Old bookmarks and notification links that still point
+  // here are sent through the same access flow as "Darslarga o‘tish", which
+  // does its own sign-in, ownership and expiry checks.
+  if (courseDelivery(courseId) === 'telegram') {
+    redirect(`/api/course-access/${courseId}`);
+  }
+
   const auth = await requireUserPage(`/course/${courseId}`);
 
   const course = await db.getCourse(courseId);

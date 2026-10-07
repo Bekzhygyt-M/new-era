@@ -812,10 +812,9 @@
     "adminAccess": "ДОСТУП АДМИНА",
     "goToLessons": "Перейти к урокам",
     "ordersTitle": "Мои заказы",
-    "ordersSubtitle": "Статус ваших оплат и доступ к курсу. Нажмите кнопку, чтобы открыть заказ.",
+    "ordersSubtitle": "Статус ваших оплат. Чтобы открыть курс, нажмите «Перейти к урокам».",
     "orderNumber": "Заказ",
     "openOrder": "Открыть заказ",
-    "openAccess": "Доступ и Telegram",
     "status": {
       "pending": "Ожидает оплаты",
       "receipt_submitted": "На проверке",
