@@ -107,6 +107,53 @@ export function inviteLinkName(payment: Pick<LocalPayment, 'id' | 'order_id'>): 
   return `access-${ref}`.slice(0, INVITE_NAME_MAX);
 }
 
+/** Longest Telegram error description kept in logs. */
+const LOG_DESCRIPTION_MAX = 160;
+
+/**
+ * Diagnostic summary of a failed Bot API response, safe to write to logs.
+ *
+ * Keeps Telegram's numeric `error_code` and a shortened `description` (e.g.
+ * "Bad Request: chat not found") — enough to tell permissions, chat id and
+ * parameter problems apart. Everything that could identify or authorise
+ * anything is removed first: the given secrets (bot token, channel id) are
+ * replaced wherever they appear, then any URL, any t.me / telegram.me
+ * reference, any "<digits>:<token>" pattern and any long number (chat / user
+ * ids). Control characters are stripped so a crafted description cannot
+ * forge extra log lines. Never throws.
+ */
+export function telegramErrorSummary(
+  body: unknown,
+  secrets: (string | null | undefined)[] = []
+): { errorCode: number | null; description: string } {
+  let parsed: unknown = body;
+  if (typeof body === 'string') {
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      parsed = null;
+    }
+  }
+  const obj = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+  const errorCode = typeof obj.error_code === 'number' && Number.isFinite(obj.error_code) ? obj.error_code : null;
+  let description = typeof obj.description === 'string' ? obj.description : '';
+
+  for (const secret of secrets) {
+    if (secret && secret.length >= 3) description = description.split(secret).join('[redacted]');
+  }
+  description = description
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
+    .replace(/\b\d{5,}:[A-Za-z0-9_-]{10,}/g, '[redacted]') // bot token shape
+    .replace(/(https?:\/\/|tg:\/\/)\S+/gi, '[url]')
+    .replace(/\b(t|telegram)\.me\/\S*/gi, '[url]')
+    .replace(/-?\d{5,}/g, '[id]') // chat, channel and user ids
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (description.length > LOG_DESCRIPTION_MAX) description = `${description.slice(0, LOG_DESCRIPTION_MAX)}…`;
+
+  return { errorCode, description: description || '(none)' };
+}
+
 type TelegramApiResponse = { ok?: boolean; result?: { invite_link?: string }; description?: string };
 
 /**
@@ -150,6 +197,8 @@ export async function issueChannelInvite(payment: LocalPayment): Promise<Telegra
     // The bot token appears only in the request path; it is never logged.
     if (!res.ok) {
       console.error('[telegram] createChatInviteLink failed with HTTP', res.status, 'for', slug);
+      const detail = telegramErrorSummary(await res.text().catch(() => ''), [token, channelId]);
+      console.error('[telegram] createChatInviteLink error for', slug, '| error_code:', detail.errorCode, '| description:', detail.description);
       return { ok: false, reason: 'api_error', message: 'Telegram bilan bog‘lanishda xatolik' };
     }
 
@@ -157,8 +206,10 @@ export async function issueChannelInvite(payment: LocalPayment): Promise<Telegra
     const inviteUrl = data.result?.invite_link;
 
     if (!data.ok || !inviteUrl) {
-      // Never log data.description verbatim beyond the shape; it can echo ids.
+      // Only the sanitized summary is logged; the raw description can echo ids.
       console.error('[telegram] createChatInviteLink rejected for', slug);
+      const detail = telegramErrorSummary(data, [token, channelId]);
+      console.error('[telegram] createChatInviteLink error for', slug, '| error_code:', detail.errorCode, '| description:', detail.description);
       return { ok: false, reason: 'api_error', message: 'Telegram havolasi yaratilmadi' };
     }
 

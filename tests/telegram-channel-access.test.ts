@@ -258,3 +258,86 @@ test('invite name is deterministic and always <= 32 chars, whatever the ids look
   assert.equal(mod.inviteLinkName({ id: REAL_UUID, order_id: '' }), `access-${REAL_UUID}`.slice(0, 32));
   mock.restoreAll();
 });
+
+// ─── Diagnostic logging of Telegram failures (sanitized) ─────────────────────
+
+const SECRET_TOKEN = '987654321:AAHsuperSecretBotTokenValue_abcdefXYZ';
+const SECRET_CHANNEL = '-1009876543210';
+
+/** Captures console.error lines for one call, then restores console. */
+async function captureErrors(fn: () => Promise<unknown>): Promise<string> {
+  const lines: string[] = [];
+  const spy = mock.method(console, 'error', (...args: unknown[]) => { lines.push(args.map(String).join(' ')); });
+  try { await fn(); } finally { spy.mock.restore(); }
+  return lines.join('\n');
+}
+
+function assertNoSecrets(log: string) {
+  assert.equal(log.includes(SECRET_TOKEN), false, 'bot token leaked');
+  assert.equal(log.includes('AAHsuperSecretBotTokenValue'), false, 'token fragment leaked');
+  assert.equal(log.includes(SECRET_CHANNEL), false, 'channel id leaked');
+  assert.equal(log.includes('9876543210'), false, 'channel id digits leaked');
+  assert.equal(/t\.me|telegram\.me|https?:\/\/|api\.telegram\.org/i.test(log), false, 'URL / invite leaked');
+  assert.equal(log.includes('access-'), false, 'request body (invite name) leaked');
+  assert.equal(log.includes('pay_1') || log.includes('NE-1') || log.includes('u1@'), false, 'payment/user data leaked');
+}
+
+test('HTTP 400: logs error_code and sanitized description; no token, channel id, URL or body', async () => {
+  const hostile = {
+    ok: false,
+    error_code: 400,
+    description:
+      `Bad Request: chat not found\n[telegram] FORGED line chat_id=${SECRET_CHANNEL} ` +
+      `token ${SECRET_TOKEN} see https://api.telegram.org/bot${SECRET_TOKEN}/x and https://t.me/+PrivInvite123`,
+  };
+  const { mod } = await load(
+    { TELEGRAM_BOT_TOKEN: SECRET_TOKEN, TELEGRAM_STANDARD_CHANNEL_ID: SECRET_CHANNEL, TELEGRAM_PRO_CHANNEL_ID: '-1001111111111' },
+    () => new Response(JSON.stringify(hostile), { status: 400 })
+  );
+  let r: { ok: boolean } | undefined;
+  const log = await captureErrors(async () => { r = await mod.issueChannelInvite(payment()); });
+  mock.restoreAll();
+
+  assert.equal(r?.ok, false);
+  assert.match(log, /createChatInviteLink failed with HTTP 400 for standard/, 'existing status log kept');
+  assert.match(log, /\| error_code: 400 \| description: Bad Request: chat not found/);
+  assertNoSecrets(log);
+  assert.equal(log.split('\n').filter((l) => l.startsWith('[telegram] FORGED')).length, 0, 'no forged log line');
+});
+
+test('HTTP 200 ok:false: rejected path logs the same sanitized detail', async () => {
+  const { mod } = await load(
+    { TELEGRAM_BOT_TOKEN: SECRET_TOKEN, TELEGRAM_STANDARD_CHANNEL_ID: SECRET_CHANNEL, TELEGRAM_PRO_CHANNEL_ID: '-1001111111111' },
+    () => new Response(JSON.stringify({ ok: false, error_code: 403, description: `Forbidden: bot is not a member of ${SECRET_CHANNEL}` }), { status: 200 })
+  );
+  const log = await captureErrors(() => mod.issueChannelInvite(payment()));
+  mock.restoreAll();
+  assert.match(log, /createChatInviteLink rejected for standard/);
+  assert.match(log, /error_code: 403 \| description: Forbidden: bot is not a member of \[(redacted|id)\]/);
+  assertNoSecrets(log);
+});
+
+test('non-JSON / empty error bodies are logged as unknown, never echoed raw', async () => {
+  const { mod } = await load(
+    { TELEGRAM_BOT_TOKEN: SECRET_TOKEN, TELEGRAM_STANDARD_CHANNEL_ID: SECRET_CHANNEL, TELEGRAM_PRO_CHANNEL_ID: '-1001111111111' },
+    () => new Response(`<html>${SECRET_TOKEN} https://t.me/+abcdefgh</html>`, { status: 502 })
+  );
+  const log = await captureErrors(() => mod.issueChannelInvite(payment()));
+  mock.restoreAll();
+  assert.match(log, /failed with HTTP 502 for standard/);
+  assert.match(log, /error_code: null \| description: \(none\)/);
+  assertNoSecrets(log);
+});
+
+test('telegramErrorSummary: shortens long descriptions and never throws', async () => {
+  const { mod } = await load({});
+  const long = mod.telegramErrorSummary({ error_code: 400, description: 'Bad Request: ' + 'x'.repeat(500) });
+  assert.equal(long.errorCode, 400);
+  assert.ok(long.description.length <= 161, String(long.description.length));
+  for (const weird of [undefined, null, 42, 'not json', '{"error_code":"400"}', { description: 7 }]) {
+    const out = mod.telegramErrorSummary(weird);
+    assert.equal(typeof out.description, 'string');
+  }
+  assert.equal(mod.telegramErrorSummary('{"error_code":"400"}').errorCode, null, 'non-numeric code ignored');
+  mock.restoreAll();
+});
