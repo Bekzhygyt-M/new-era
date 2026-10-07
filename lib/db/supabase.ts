@@ -1,4 +1,5 @@
 import { supabaseAdmin, unwrap } from '@/lib/db/supabase-client';
+import { insertWithUniqueOrderId, isOrderIdConflict } from '@/lib/payments/order-number';
 import {
   DEFAULT_SETTINGS,
   MASTER_ADMIN_EMAIL,
@@ -695,27 +696,45 @@ export const supabaseAdapter: Database = {
     }
 
     const settings = await readSettings();
-    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const count = unwrap(
-      await sb().from('payments').select('id', { count: 'exact', head: true }),
-      'savePayment:count'
-    );
-    const sequence = String(((count as unknown as number) || 0) + 1).padStart(6, '0');
+    const row = {
+      ...writable,
+      currency: paymentData.currency || settings.currency,
+      provider: paymentData.provider || 'manual',
+      status: paymentData.status || 'pending',
+      expires_at:
+        paymentData.expires_at ||
+        new Date(Date.now() + settings.payment_window_minutes * 60 * 1000).toISOString(),
+    };
 
-    return insertOne<LocalPayment>(
-      'payments',
-      {
-        ...writable,
-        order_id: paymentData.order_id || `NE-${stamp}-${sequence}`,
-        currency: paymentData.currency || settings.currency,
-        provider: paymentData.provider || 'manual',
-        status: paymentData.status || 'pending',
-        expires_at:
-          paymentData.expires_at ||
-          new Date(Date.now() + settings.payment_window_minutes * 60 * 1000).toISOString(),
+    // A caller-supplied order number is inserted as-is (unchanged behaviour).
+    if (paymentData.order_id) {
+      return insertOne<LocalPayment>('payments', { ...row, order_id: paymentData.order_id }, 'savePayment:insert');
+    }
+
+    // Otherwise allocate NE-YYYYMMDD-XXXXXX. The unique constraint on
+    // payments.order_id is the guarantee; a concurrent insert that wins the
+    // same number makes this one retry with the next (lib/payments/order-number).
+    return insertWithUniqueOrderId<LocalPayment>({
+      countExisting: async () => {
+        // A head:true count arrives in `count`; `data` is always null.
+        const { count, error } = await sb().from('payments').select('id', { count: 'exact', head: true });
+        if (error) throw new Error(`[supabase] savePayment:count: ${error.message}`);
+        return count ?? 0;
       },
-      'savePayment:insert'
-    );
+      tryInsert: async (orderId) => {
+        const { data, error } = await sb()
+          .from('payments')
+          .insert(defined({ ...row, order_id: orderId }))
+          .select('*')
+          .single();
+        if (!error) return { ok: true, row: data as LocalPayment };
+        return {
+          ok: false,
+          conflict: isOrderIdConflict(error),
+          error: new Error(`[supabase] savePayment:insert: ${error.message}`),
+        };
+      },
+    });
   },
 
   async approvePayment(idOrOrderId, approvedBy) {
